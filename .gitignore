@@ -1,0 +1,9 @@
+.env
+__pycache__/
+.playwright/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+AGENTFORGE_FULL_IMPLEMENTATION.md
+currentStatus.md
