@@ -26,6 +26,10 @@ class TaskRequest(BaseModel):
     context: str = Field(default="", max_length=4000)
     repo_url: str = Field(default="", max_length=500)
     github_token: str = Field(default="", max_length=500)
+    # Client-generated identifier for a GitHub work session. Repeated calls
+    # with the same value continue committing to the same branch/PR; a fresh
+    # value (or none) starts a new branch. Unrelated to the per-request task id.
+    session_id: str = Field(default="", max_length=100)
 
     def normalized_prompt(self) -> str:
         return self.prompt.strip()
@@ -45,12 +49,12 @@ def _is_rate_limited(error: Exception) -> bool:
     return error.__class__.__name__ == "RateLimitError" or "rate_limit_exceeded" in err_str or "resource_exhausted" in err_str or "429" in err_str
 
 
-def _run_task(prompt: str, context: str, repo_url: str, github_token: str, emitter: EventEmitter) -> None:
+def _run_task(prompt: str, context: str, repo_url: str, github_token: str, session_id: str, emitter: EventEmitter) -> None:
     """Execute one task and guarantee its stream has a terminal event."""
     try:
         intent = IntentParser().parse(prompt, context)
         emitter.emit("intent_detected", {"intent": intent.intent, "confidence": intent.confidence, "reason": intent.reason})
-        result = CrewEngine().run(intent, prompt, context, emitter, repo_url=repo_url, github_token=github_token)
+        result = CrewEngine().run(intent, prompt, context, emitter, repo_url=repo_url, github_token=github_token, session_id=session_id)
         emitter.emit("result", result)
         emitter.emit("task_completed", {"status": "completed"})
     except Exception as exc:
@@ -95,7 +99,7 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
     emitter.emit("task_started", {"prompt": prompt[:500]})
 
     def run_task() -> None:
-        _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), emitter)
+        _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), emitter)
 
     Thread(target=run_task, name=f"agentforge-{emitter.task_id}", daemon=True).start()
 
@@ -119,7 +123,7 @@ def run_task(request: TaskRequest) -> dict[str, list[dict]]:
     prompt = _validate_prompt(request)
     emitter = EventEmitter(str(uuid.uuid4()))
     emitter.emit("task_started", {"prompt": prompt[:500]})
-    _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), emitter)
+    _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), emitter)
     events: list[dict] = []
     while True:
         event = emitter.queue.get()

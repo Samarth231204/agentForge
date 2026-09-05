@@ -35,7 +35,7 @@ def test_rate_limited_task_has_a_clear_retryable_event(monkeypatch):
 
     monkeypatch.setattr(main.IntentParser, "parse", lambda *_args: (_ for _ in ()).throw(RateLimitError("rate_limit_exceeded")))
     emitter = EventEmitter("test-rate-limit")
-    main._run_task("Research something", "", "", "", emitter)
+    main._run_task("Research something", "", "", "", "", emitter)
     events = []
     while True:
         event = emitter.queue.get()

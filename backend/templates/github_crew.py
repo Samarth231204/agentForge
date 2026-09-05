@@ -37,8 +37,17 @@ def run_github_workflow(
         image=settings.sandbox_image,
     )
 
+    try:
+        return _run_workflow(user_request, github, branch, settings)
+    finally:
+        github.cleanup()
+
+
+def _run_workflow(user_request: str, github: GithubTool, branch: str, settings: Settings) -> str:
     # Phase 1: Explore (no LLM calls)
-    github._run("clone")
+    # Continues on this session's branch if an earlier query already pushed
+    # one; otherwise falls through to the repository's default branch.
+    github._run("clone", branch_name=branch)
     all_files_raw = github._run("list_files")
     all_files = [f.strip() for f in all_files_raw.splitlines() if f.strip()]
 
@@ -102,6 +111,7 @@ def run_github_workflow(
         content = file_entry.get("content", "")
         if not fpath:
             continue
+
         github._run("write_file", file_path=fpath, content=content)
         written.append(fpath)
 
