@@ -19,26 +19,28 @@ class CrewEngine:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
-    def run(self, intent: Intent, prompt: str, context: str, emitter: EventEmitter, *, repo_url: str = "", github_token: str = "") -> dict[str, Any]:
+    def run(self, intent: Intent, prompt: str, context: str, emitter: EventEmitter, *, repo_url: str = "", github_token: str = "", session_id: str = "") -> dict[str, Any]:
         if intent.intent == "unsupported":
             message = f"{intent.reason} In Phase 1, AgentForge can research public information or create an email draft."
             return {"intent": "unsupported", "content": message, "sources": []}
         if intent.intent == "draft_email":
             return self._run_email(prompt, context, emitter)
         if intent.intent == "github":
-            return self._run_github(intent.task_summary, prompt, repo_url, github_token, emitter)
+            return self._run_github(intent.task_summary, prompt, repo_url, github_token, session_id, emitter)
         return self._run_research(prompt, context, emitter)
 
-    def _run_github(self, task_summary: str, prompt: str, repo_url: str, github_token: str, emitter: EventEmitter) -> dict[str, Any]:
+    def _run_github(self, task_summary: str, prompt: str, repo_url: str, github_token: str, session_id: str, emitter: EventEmitter) -> dict[str, Any]:
         if not repo_url or not github_token:
             return {"intent": "github", "content": "Add a GitHub HTTPS repository URL and fine-grained token in the sidebar before running a repository task.", "sources": []}
         agents = ["Code Reader", "Software Engineer", "QA Engineer", "PR Manager"]
         emitter.emit("workflow_started", {"workflow": "github_crew", "agents": agents})
         for agent, role in zip(agents, ("repository inspection", "implementation", "testing", "pull request management")):
             emitter.emit("agent_started", {"agent": agent, "role": role})
-        # The session id is generated server-side and is the Docker-volume namespace.
-        session_id = emitter.task_id
-        output = run_github_workflow(prompt, repo_url, github_token, session_id, self.settings)
+        # A caller-supplied session_id lets multiple queries share one branch
+        # (see run_github_workflow); fall back to the task id for callers
+        # (tests, direct API use) that don't track a session of their own.
+        github_session_id = session_id or emitter.task_id
+        output = run_github_workflow(prompt, repo_url, github_token, github_session_id, self.settings)
         for agent in agents:
             emitter.emit("agent_completed", {"agent": agent, "summary": "Completed its repository-workflow stage."})
         return {"intent": "github", "content": output, "sources": []}

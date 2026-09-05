@@ -5,7 +5,19 @@ from __future__ import annotations
 import streamlit as st
 
 
-DEFAULTS = {"events": [], "current_task": None, "result": None, "is_running": False, "github_repo_url": "", "github_token": ""}
+DEFAULTS = {
+    "events": [],
+    "current_task": None,
+    "result": None,
+    "is_running": False,
+    "github_repo_url": "",
+    "github_token": "",
+    # Persists across queries in this browser session so repeated GitHub
+    # tasks continue committing to the same branch/PR instead of each
+    # starting a fresh one. Cleared on repo change or an explicit reset.
+    "github_session_id": "",
+    "github_session_repo": "",
+}
 
 
 def initialize_state() -> None:

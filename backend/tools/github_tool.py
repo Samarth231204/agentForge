@@ -65,58 +65,87 @@ class GithubTool(BaseTool):
 
     def _run(self, action: str, file_path: str = "", content: str = "", command: str = "", branch_name: str = "", title: str = "", body: str = "") -> str:
         if action == "clone":
-            return self._clone()
+            return self._clone(branch_name)
         if action == "list_files":
-            return self._docker("find . -path './.git' -prune -o -type f -print | sed 's#^./##' | sort")
+            return self._docker("cd /sandbox/repo && find . -path './.git' -prune -o -type f -print | sed 's#^./##' | sort")
         if action == "read_file":
             path = self._safe_path(file_path)
-            return self._docker(f"test -f {shlex.quote(path)} && cat -- {shlex.quote(path)}")
+            return self._docker(f"cd /sandbox/repo && test -f {shlex.quote(path)} && cat -- {shlex.quote(path)}")
         if action == "write_file":
             path = self._safe_path(file_path)
-            return self._docker(f"mkdir -p -- {shlex.quote(str(PurePosixPath(path).parent))}; cat > {shlex.quote(path)}", input_text=content)
+            return self._docker(f"cd /sandbox/repo && mkdir -p -- {shlex.quote(str(PurePosixPath(path).parent))}; cat > {shlex.quote(path)}", input_text=content)
         if action == "run_command":
             self._validate_command(command)
-            return self._docker(command, timeout=90)
+            return self._docker(f"cd /sandbox/repo && {command}", timeout=90, allow_nonzero_exit=True)
         if action == "push_branch":
             return self._push_branch(branch_name)
         if action == "create_pull_request":
             return self._create_pull_request(branch_name, title, body)
         raise ValueError(f"Unknown sandbox action: {action}")
 
-    def _clone(self) -> str:
-        # /sandbox/repo is pre-created and chowned to sandboxuser by _ensure_volume.
-        # We clean its contents but keep the directory so the ownership persists.
+    # Credentials are supplied to git via GIT_ASKPASS (backed by the GITHUB_PAT
+    # env var) rather than embedded in the remote URL. Docker only receives the
+    # env var *name* on its command line (see _docker), so the token never
+    # appears in the sandbox script text or in host/container process listings.
+    _GIT_AUTH_ENV = {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/opt/agentforge/git-askpass",
+    }
+
+    def _clone(self, branch_name: str = "") -> str:
+        # If this session already pushed a branch in an earlier query, continue
+        # on it instead of restarting from the default branch. A blank or
+        # not-yet-pushed branch_name is a no-op (silently falls through to the
+        # default branch), so the first query in a session is unaffected.
+        checkout_existing = ""
+        if branch_name:
+            branch = self._safe_branch(branch_name)
+            checkout_existing = f"cd /sandbox/repo && (git fetch origin {shlex.quote(branch)} && git checkout {shlex.quote(branch)}) >/dev/null 2>&1 || true; "
         script = (
             'set -eu; '
             'find /sandbox/repo -mindepth 1 -delete 2>/dev/null || true; '
-            'export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/opt/agentforge/git-askpass; '
-            'git clone -- "$REPO_URL" /sandbox/repo'
+            f'git clone -- {shlex.quote(self._repo_url)} /sandbox/repo; '
+            f'{checkout_existing}'
+            'true'
         )
-        return self._docker(script, network="bridge", secret_env={"REPO_URL": self._repo_url, "GITHUB_PAT": self._token}, timeout=180)
+        return self._docker(script, network="bridge", secret_env={**self._GIT_AUTH_ENV, "GITHUB_PAT": self._token}, timeout=300)
 
     def _push_branch(self, branch_name: str) -> str:
         branch = self._safe_branch(branch_name)
         script = (
-            "set -eu; cd /sandbox/repo; "
-            "export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/opt/agentforge/git-askpass; "
+            f"set -eu; cd /sandbox/repo; "
+            f"git remote set-url origin {shlex.quote(self._repo_url)}; "
             "git config user.email agentforge@local.invalid; git config user.name AgentForge; "
             f"git checkout -B {shlex.quote(branch)}; git add --all; "
             "git diff --cached --quiet && { echo 'No changes to push.'; exit 0; }; "
             "git commit -m 'AgentForge requested change'; git push --set-upstream origin HEAD"
         )
-        return self._docker(script, network="bridge", secret_env={"GITHUB_PAT": self._token}, timeout=180)
+        return self._docker(script, network="bridge", secret_env={**self._GIT_AUTH_ENV, "GITHUB_PAT": self._token}, timeout=300)
 
     def _create_pull_request(self, branch_name: str, title: str, body: str) -> str:
         branch = self._safe_branch(branch_name)
         owner, repo = self._github_coordinates(self._repo_url)
+        headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self._token}"}
         response = httpx.post(
             f"https://api.github.com/repos/{owner}/{repo}/pulls",
-            headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self._token}"},
+            headers=headers,
             json={"title": title.strip() or "AgentForge change", "head": branch, "base": self._default_branch(owner, repo), "body": body.strip()},
             timeout=30,
         )
+        if response.status_code == 422 and "already exists" in response.text.lower():
+            # A later query on the same session's branch: the earlier query's
+            # PR is still open and now carries this query's newly pushed
+            # commits too, so surface that PR rather than failing.
+            existing = httpx.get(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls",
+                headers=headers,
+                params={"head": f"{owner}:{branch}", "state": "open"},
+                timeout=30,
+            )
+            if existing.status_code < 400 and existing.json():
+                return f"Pushed new commits to the existing pull request: {existing.json()[0].get('html_url', '')}"
         if response.status_code >= 400:
-            raise SandboxUnavailable("GitHub could not create the pull request. Check the token's repository and pull-request permissions.")
+            raise SandboxUnavailable(f"GitHub could not create the pull request ({response.status_code}): {response.text[:300]}")
         data = response.json()
         return f"Pull request created: {data.get('html_url', '')}"
 
@@ -126,8 +155,18 @@ class GithubTool(BaseTool):
             raise SandboxUnavailable("GitHub could not read repository metadata. Check the token's repository access.")
         return str(response.json().get("default_branch") or "main")
 
+    def cleanup(self) -> None:
+        """Remove this session's Docker volume. Every action re-clones from
+        scratch, so nothing of value is lost; state that matters lives on the
+        pushed remote branch, not the local volume."""
+        subprocess.run(["docker", "volume", "rm", "-f", self.volume_name], capture_output=True, text=True, timeout=30, check=False)
+
     def _ensure_volume(self) -> None:
-        self._host_docker(["volume", "create", self.volume_name], timeout=30)
+        try:
+            self._host_docker(["volume", "create", self.volume_name], timeout=30)
+        except SandboxUnavailable:
+            # Ignore error if volume already exists.
+            pass
         # On Docker Desktop for Mac with VirtioFS, the volume mountpoint (/sandbox)
         # is always root-owned regardless of chmod. The workaround is to create the
         # /sandbox/repo subdirectory as root and chown it to sandboxuser (uid 10001).
@@ -138,20 +177,41 @@ class GithubTool(BaseTool):
             timeout=30,
         )
 
-    def _docker(self, script: str, *, input_text: str | None = None, network: str = "none", secret_env: dict[str, str] | None = None, timeout: int = 60) -> str:
+    def _docker(self, script: str, *, input_text: str | None = None, network: str = "none", secret_env: dict[str, str] | None = None, timeout: int = 60, allow_nonzero_exit: bool = False) -> str:
         self._ensure_volume()
-        command = ["run", "--rm", "--network", network, "--read-only", "--cap-drop", "ALL", "--pids-limit", "256", "--memory", "1g", "--cpus", "1", "-v", f"{self.volume_name}:/sandbox", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+        # We start as root to hand ownership of the mounted volume and tmpfs
+        # home dir to sandboxuser, then drop into that user via su. Keep the
+        # sandbox locked down otherwise: drop every capability except the four
+        # that step requires (CHOWN/DAC_OVERRIDE to take/access the freshly
+        # mounted root-owned paths, SETUID/SETGID for su to drop privileges).
+        command = [
+            "run", "--rm", "--user", "root", "--network", network, "--read-only",
+            "--cap-drop", "ALL",
+            "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--cap-add", "SETUID", "--cap-add", "SETGID",
+            "--pids-limit", "256", "--memory", "1g", "--cpus", "1",
+            "-v", f"{self.volume_name}:/sandbox",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs", "/home/sandboxuser:rw,noexec,nosuid,size=64m",
+        ]
         if input_text is not None:
             command.append("-i")
         for key in (secret_env or {}):
-            # Docker reads this value from its process environment, keeping it out
-            # of command arguments and therefore out of process listings.
             command.extend(["-e", key])
-        command.extend([self._image, "bash", "-lc", script])
-        return self._host_docker(command, input_text=input_text, secret_env=secret_env, timeout=timeout)
+
+        # Ensure /sandbox/repo and the tmpfs home dir are owned by sandboxuser
+        # (both are freshly mounted root-owned each run), then execute as sandboxuser.
+        # A non-login `su` (no "-") is required: a login shell resets the
+        # environment, dropping GIT_ASKPASS/GITHUB_PAT before git ever sees them.
+        wrapped_script = (
+            f"mkdir -p /sandbox/repo && chown -R 10001:10001 /sandbox/repo /home/sandboxuser && "
+            f"HOME=/home/sandboxuser su sandboxuser -c {shlex.quote(script)}"
+        )
+
+        command.extend([self._image, "bash", "-lc", wrapped_script])
+        return self._host_docker(command, input_text=input_text, secret_env=secret_env, timeout=timeout, allow_nonzero_exit=allow_nonzero_exit)
 
     @staticmethod
-    def _host_docker(arguments: list[str], *, input_text: str | None = None, secret_env: dict[str, str] | None = None, timeout: int) -> str:
+    def _host_docker(arguments: list[str], *, input_text: str | None = None, secret_env: dict[str, str] | None = None, timeout: int, allow_nonzero_exit: bool = False) -> str:
         try:
             environment = os.environ.copy()
             environment.update(secret_env or {})
@@ -160,9 +220,13 @@ class GithubTool(BaseTool):
             raise SandboxUnavailable("Docker Desktop is not running. Start Docker Desktop and retry.") from exc
         except subprocess.TimeoutExpired as exc:
             raise SandboxUnavailable("The Docker sandbox timed out.") from exc
-        if result.returncode != 0:
-            raise SandboxUnavailable("The Docker sandbox could not complete that operation.")
-        return (result.stdout or result.stderr).strip()
+        if result.returncode != 0 and not allow_nonzero_exit:
+            detail = (result.stderr or result.stdout or "").strip()[-800:]
+            raise SandboxUnavailable(f"The Docker sandbox could not complete that operation: {detail}")
+        output = (result.stdout or result.stderr).strip()
+        if allow_nonzero_exit and result.returncode != 0:
+            output = f"{output}\n[exit code {result.returncode}]"
+        return output
 
     @staticmethod
     def _safe_path(file_path: str) -> str:

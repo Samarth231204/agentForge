@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import requests
 import streamlit as st
 
@@ -15,7 +17,7 @@ from utils.state import initialize_state, reset_state
 st.set_page_config(page_title="AgentForge", page_icon="⚒️", layout="wide")
 initialize_state()
 
-backend_url, repo_url, github_token, reset_requested = render_sidebar()
+backend_url, repo_url, github_token, reset_requested, new_branch_requested = render_sidebar()
 if reset_requested:
     reset_state()
     st.rerun()
@@ -37,9 +39,15 @@ if submitted:
         st.session_state.events = []
         st.session_state.result = None
         st.session_state.is_running = True
+        # Start a fresh branch when asked, or when the repo changed since the
+        # session id was created; otherwise keep committing to the same one.
+        repo_url_stripped = repo_url.strip()
+        if new_branch_requested or not st.session_state.github_session_id or st.session_state.github_session_repo != repo_url_stripped:
+            st.session_state.github_session_id = uuid.uuid4().hex
+            st.session_state.github_session_repo = repo_url_stripped
         connection_slot.info("Connecting to AgentForge…")
         try:
-            for event in stream_task(backend_url, prompt.strip(), context.strip(), repo_url.strip(), github_token.strip()):
+            for event in stream_task(backend_url, prompt.strip(), context.strip(), repo_url_stripped, github_token.strip(), st.session_state.github_session_id):
                 connection_slot.empty()
                 st.session_state.events.append(event)
                 if event.get("type") == "result":

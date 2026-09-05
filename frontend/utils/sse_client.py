@@ -27,10 +27,10 @@ def _parse_sse_lines(lines: Iterable[str | None]) -> Generator[dict, None, None]
             data_lines.append(line[5:].lstrip())
 
 
-def stream_task(backend_url: str, prompt: str, context: str, repo_url: str = "", github_token: str = "") -> Generator[dict, None, None]:
+def stream_task(backend_url: str, prompt: str, context: str, repo_url: str = "", github_token: str = "", session_id: str = "") -> Generator[dict, None, None]:
     url = f"{backend_url.rstrip('/')}/tasks"
     # Streamlit uses the bounded JSON endpoint. The backend's /tasks/stream
     # endpoint remains available for API consumers that need raw SSE.
-    with requests.post(url, json={"prompt": prompt, "context": context, "repo_url": repo_url, "github_token": github_token}, timeout=(10, 600)) as response:
+    with requests.post(url, json={"prompt": prompt, "context": context, "repo_url": repo_url, "github_token": github_token, "session_id": session_id}, timeout=(10, 600)) as response:
         response.raise_for_status()
         yield from response.json()["events"]
