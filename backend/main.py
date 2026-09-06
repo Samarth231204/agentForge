@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from queue import Empty
 from threading import Thread
+from typing import Callable, TypeVar
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,22 +45,40 @@ def _validate_prompt(request: TaskRequest) -> str:
     return prompt
 
 
-def _is_rate_limited(error: Exception) -> bool:
-    """Recognize provider rate-limit exceptions without exposing provider details."""
-    err_str = str(error).lower()
-    return error.__class__.__name__ == "RateLimitError" or "rate_limit_exceeded" in err_str or "resource_exhausted" in err_str or "429" in err_str
+T = TypeVar("T")
+
+
+def _call_with_retry(fn: Callable[[], T], emitter: EventEmitter, step: str, max_retries: int = 2) -> T:
+    """Run fn(), retrying it up to max_retries times if it fails with a
+    transient provider error (rate limit / 429 / 503 / unavailable). A
+    permanent failure (bad request, validation error, etc.) is never
+    retried — it would just fail identically. A single retry proved
+    insufficient in practice for booking's multi-stage pipeline, which can
+    burn most of a free-tier per-minute token budget in one run and hit the
+    same wall again immediately on the first retry."""
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == max_retries or not CrewEngine._is_rate_limited(exc):
+                raise
+            delay = CrewEngine._retry_delay(exc)
+            logger.warning("AgentForge %s hit a transient provider error, retrying in %.1fs (attempt %d/%d): task_id=%s error=%s", step, delay, attempt + 1, max_retries, emitter.task_id, exc)
+            time.sleep(delay)
+    raise AssertionError("unreachable")  # loop always returns or raises above
 
 
 def _run_task(prompt: str, context: str, repo_url: str, github_token: str, session_id: str, emitter: EventEmitter) -> None:
     """Execute one task and guarantee its stream has a terminal event."""
     try:
-        intent = IntentParser().parse(prompt, context)
+        has_repo_context = bool(repo_url and github_token)
+        intent = _call_with_retry(lambda: IntentParser().parse(prompt, context, has_repo_context), emitter, "intent classification")
         emitter.emit("intent_detected", {"intent": intent.intent, "confidence": intent.confidence, "reason": intent.reason})
-        result = CrewEngine().run(intent, prompt, context, emitter, repo_url=repo_url, github_token=github_token, session_id=session_id)
+        result = _call_with_retry(lambda: CrewEngine().run(intent, prompt, context, emitter, repo_url=repo_url, github_token=github_token, session_id=session_id), emitter, "workflow")
         emitter.emit("result", result)
         emitter.emit("task_completed", {"status": "completed"})
     except Exception as exc:
-        if _is_rate_limited(exc):
+        if CrewEngine._is_rate_limited(exc):
             logger.warning("AgentForge LLM rate limited: task_id=%s error=%s", emitter.task_id, exc)
             emitter.emit("error", {"code": "llm_rate_limited", "message": "The AI provider is temporarily rate-limited. Please retry shortly.", "retryable": True})
         else:

@@ -2,9 +2,7 @@ import subprocess
 
 import pytest
 
-pytest.importorskip("crewai", reason="requires the CrewAI runtime declared by AgentForge")
-
-from backend.tools.github_tool import GithubTool, GithubToolInput, SandboxUnavailable, create_github_operation_tools
+from backend.tools.github_tool import GithubTool, SandboxUnavailable
 
 
 def _tool() -> GithubTool:
@@ -20,29 +18,6 @@ def test_rejects_path_traversal_and_unsafe_commands():
         _tool()._run("read_file", file_path="../../.env")
     with pytest.raises(ValueError, match="approved"):
         _tool()._run("run_command", command="pytest; curl https://example.com")
-
-
-def test_tool_schema_requires_explicit_empty_values_for_groq_native_tools():
-    required = GithubToolInput.model_json_schema()["required"]
-    assert required == ["action", "file_path", "content", "command", "branch_name", "title", "body"]
-
-
-def test_crew_uses_small_action_specific_tool_schemas_for_groq():
-    tools = create_github_operation_tools(_tool())
-    clone_schema = tools["clone"].args_schema.model_json_schema()
-    assert clone_schema["required"] == ["confirm"]
-    assert clone_schema["properties"]["confirm"]["type"] == "string"
-    assert tools["read"].args_schema.model_json_schema()["required"] == ["file_path"]
-    assert tools["write"].args_schema.model_json_schema()["required"] == ["file_path", "content"]
-    assert tools["checks"].args_schema.model_json_schema()["required"] == ["command"]
-    assert tools["pr"].args_schema.model_json_schema()["required"] == ["title", "body"]
-
-
-def test_no_github_operation_tool_has_an_empty_property_schema():
-    for tool in create_github_operation_tools(_tool()).values():
-        schema = tool.args_schema.model_json_schema()
-        assert "properties" in schema
-        assert not ("required" in schema and not schema["properties"])
 
 
 def test_docker_operations_are_isolated_and_do_not_place_token_in_arguments(monkeypatch):

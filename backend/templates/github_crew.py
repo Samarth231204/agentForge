@@ -15,9 +15,8 @@ from __future__ import annotations
 import json
 import re
 
-import litellm
-
 from backend.config import Settings
+from backend.llm_fallback import build_llm_candidates, complete_with_fallback
 from backend.tools.github_tool import GithubTool, SandboxUnavailable
 
 
@@ -87,21 +86,32 @@ def _run_workflow(user_request: str, github: GithubTool, branch: str, settings: 
         f"Sample file contents:\n{context_block}"
     )
 
-    response = litellm.completion(
-        model=f"groq/{settings.groq_model}",
-        api_key=settings.groq_api_key,
+    response = complete_with_fallback(
+        build_llm_candidates(settings),
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
         temperature=0.1,
-        max_tokens=2048,
+        max_tokens=6000,
     )
 
     raw = response.choices[0].message.content or ""
+    finish_reason = response.choices[0].finish_reason
     plan = _parse_json_plan(raw)
 
     if not plan or not plan.get("files"):
+        if finish_reason == "length":
+            # The plan JSON was cut off mid-generation by the output-token
+            # cap, not abandoned by the model — surfacing the raw truncated
+            # text as if it were a real answer (the previous behavior) hides
+            # the actual cause. Detected via the response's own finish_reason
+            # rather than guessing from the malformed JSON itself.
+            return (
+                "The requested change is too large to generate in a single step — the response "
+                "was cut off before it finished. Try asking for a smaller file, or splitting this "
+                "into multiple smaller requests."
+            )
         return f"The agent could not determine what changes to make.\n\nAgent response:\n{raw}"
 
     # Phase 3: Apply (no LLM calls)
@@ -120,7 +130,18 @@ def _run_workflow(user_request: str, github: GithubTool, branch: str, settings: 
 
     push_result = github._run("push_branch", branch_name=branch)
     if "No changes to push" in push_result:
-        return "No changes were needed – the repository already satisfies the request."
+        ignored = _extract_gitignored_paths(push_result)
+        if ignored:
+            return (
+                f"Could not commit {', '.join(ignored)}: this repository's .gitignore excludes "
+                f"{'it' if len(ignored) == 1 else 'them'}. Remove or adjust that rule if you want "
+                f"{'this file' if len(ignored) == 1 else 'these files'} tracked, or ask for a "
+                "different file name or path."
+            )
+        return (
+            "No changes were needed – git reported nothing to commit after writing "
+            f"{', '.join(written)}.\n\nDiagnostic detail:\n{push_result}"
+        )
 
     pr_title = plan.get("pr_title") or "AgentForge requested change"
     pr_body = plan.get("pr_body") or f"Changes requested: {user_request}"
@@ -131,6 +152,12 @@ def _run_workflow(user_request: str, github: GithubTool, branch: str, settings: 
         f"Files changed: {', '.join(written)}\n\n"
         f"{pr_result}"
     )
+
+
+def _extract_gitignored_paths(push_result: str) -> list[str]:
+    """Parse `git status --short --ignored` lines (prefixed "!! ") out of the
+    diagnostic text push_branch returns when nothing was staged."""
+    return [line[3:].strip() for line in push_result.splitlines() if line.startswith("!! ")]
 
 
 def _build_context_block(file_contents: dict[str, str]) -> str:

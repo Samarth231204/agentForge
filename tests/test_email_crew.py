@@ -1,9 +1,5 @@
 from types import SimpleNamespace
 
-import pytest
-
-pytest.importorskip("crewai", reason="requires the CrewAI runtime declared by Phase 1")
-
 from backend.templates.email_crew import DRAFT_NOTICE
 
 
@@ -12,11 +8,7 @@ def test_email_engine_returns_draft_only_notice(monkeypatch):
     from backend.event_emitter import EventEmitter
     from backend.intent_parser import Intent
 
-    class FakeCrew:
-        def kickoff(self):
-            return "Subject: Launch update\n\nHello team"
-
-    monkeypatch.setattr("backend.crew_engine.create_email_crew", lambda *_args: FakeCrew())
+    monkeypatch.setattr("backend.crew_engine.run_email_workflow", lambda *_args: "Subject: Launch update\n\nHello team")
     engine = CrewEngine.__new__(CrewEngine)
     engine.settings = SimpleNamespace()
     result = engine.run(Intent(intent="draft_email", confidence=1, reason="draft", task_summary="draft"), "Write an email", "", EventEmitter("task-1"))
@@ -24,30 +16,24 @@ def test_email_engine_returns_draft_only_notice(monkeypatch):
     assert DRAFT_NOTICE in result["content"]
 
 
-def test_email_crew_has_three_sequential_agents(monkeypatch):
+def test_email_workflow_chains_planner_writer_reviewer_sequentially(monkeypatch):
     from backend.templates import email_crew
 
-    captured = {}
+    calls = []
 
-    class FakeLLM:
-        def __init__(self, **_kwargs):
-            pass
+    def fake_completion(*, model, api_key, temperature, messages):
+        calls.append(messages)
+        stage = len(calls)
+        content = {1: "BRIEF-CONTENT", 2: "DRAFT-CONTENT", 3: "REVIEW-CONTENT"}[stage]
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
 
-    class FakeAgent:
-        def __init__(self, **kwargs):
-            self.role = kwargs["role"]
+    monkeypatch.setattr("backend.llm_fallback.litellm.completion", fake_completion)
+    settings = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_model="")
 
-    class FakeTask:
-        def __init__(self, **_kwargs):
-            pass
+    result = email_crew.run_email_workflow("Write an email", "", settings)
 
-    class FakeCrew:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr(email_crew, "LLM", FakeLLM)
-    monkeypatch.setattr(email_crew, "Agent", FakeAgent)
-    monkeypatch.setattr(email_crew, "Task", FakeTask)
-    monkeypatch.setattr(email_crew, "Crew", FakeCrew)
-    email_crew.create_email_crew("Write an email", "", SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-20b"))
-    assert [agent.role for agent in captured["agents"]] == ["Email Planner", "Email Writer", "Email Reviewer"]
+    assert len(calls) == 3
+    assert "Write an email" in calls[0][1]["content"]  # planner sees the raw request
+    assert "BRIEF-CONTENT" in calls[1][1]["content"]  # writer sees the planner's brief
+    assert "BRIEF-CONTENT" in calls[2][1]["content"] and "DRAFT-CONTENT" in calls[2][1]["content"]  # reviewer sees both
+    assert result == "REVIEW-CONTENT"
