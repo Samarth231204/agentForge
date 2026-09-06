@@ -1,7 +1,5 @@
 import pytest
 
-pytest.importorskip("crewai", reason="requires the CrewAI runtime declared by Phase 1")
-
 from backend.tools.web_search_tool import SearchUnavailable, WebSearchTool
 
 

@@ -7,49 +7,18 @@ import re
 import shlex
 import subprocess
 from pathlib import PurePosixPath
-from typing import Literal
 
 import httpx
-from crewai.tools import BaseTool
-from pydantic import BaseModel, Field, PrivateAttr
 
 
 class SandboxUnavailable(RuntimeError):
     """Raised when Docker is unavailable or a sandbox operation cannot run."""
 
 
-class GithubToolInput(BaseModel):
-    action: Literal["clone", "list_files", "read_file", "write_file", "run_command", "push_branch", "create_pull_request"] = Field(description="The sandbox operation to perform.")
-    # Groq native tools currently validate every declared property. Every call
-    # must therefore include all fields and use an empty string when a field is
-    # irrelevant to its selected action.
-    file_path: str = Field(description="Relative path inside the cloned repository, or an empty string.")
-    content: str = Field(description="Complete text content for write_file, or an empty string.")
-    command: str = Field(description="One approved test or lint command, or an empty string.")
-    branch_name: str = Field(description="agentforge/... branch name for push/PR, or an empty string.")
-    title: str = Field(description="Pull request title, or an empty string.")
-    body: str = Field(description="Pull request description, or an empty string.")
-
-
-class GithubTool(BaseTool):
+class GithubTool:
     """Operate a single session's repository without exposing its PAT to the agent."""
 
-    name: str = "github_sandbox"
-    description: str = (
-        "Use the isolated GitHub sandbox. Clone first, then list_files/read_file/write_file, "
-        "run an approved test command, push_branch, and create_pull_request. Credentials "
-        "are configured outside the agent and must never be requested, displayed, or logged. "
-        "EVERY call must include action, file_path, content, command, branch_name, title, and body; "
-        "set every field not needed by that action to an empty string."
-    )
-    args_schema: type[BaseModel] = GithubToolInput
-    _repo_url: str = PrivateAttr(default="")
-    _token: str = PrivateAttr(default="")
-    _session_id: str = PrivateAttr(default="")
-    _image: str = PrivateAttr(default="agentforge-sandbox:local")
-
-    def __init__(self, *, repo_url: str, token: str, session_id: str, image: str = "agentforge-sandbox:local", **kwargs: object) -> None:
-        super().__init__(**kwargs)
+    def __init__(self, *, repo_url: str, token: str, session_id: str, image: str = "agentforge-sandbox:local") -> None:
         self._repo_url = self._validate_repo_url(repo_url)
         if not token.strip():
             raise ValueError("A GitHub token is required for repository tasks.")
@@ -117,7 +86,7 @@ class GithubTool(BaseTool):
             f"git remote set-url origin {shlex.quote(self._repo_url)}; "
             "git config user.email agentforge@local.invalid; git config user.name AgentForge; "
             f"git checkout -B {shlex.quote(branch)}; git add --all; "
-            "git diff --cached --quiet && { echo 'No changes to push.'; exit 0; }; "
+            "git diff --cached --quiet && { echo 'No changes to push.'; echo '--- git status (including gitignored) ---'; git status --short --ignored; echo '--- git log -1 ---'; git log -1 --oneline; exit 0; }; "
             "git commit -m 'AgentForge requested change'; git push --set-upstream origin HEAD"
         )
         return self._docker(script, network="bridge", secret_env={**self._GIT_AUTH_ENV, "GITHUB_PAT": self._token}, timeout=300)
@@ -264,123 +233,3 @@ class GithubTool(BaseTool):
         if not match:
             raise ValueError("Could not determine GitHub repository coordinates.")
         return match.group(1), match.group(2)
-
-
-# Groq's native tool parser is considerably more reliable with small schemas.
-# These adapters deliberately expose one operation per tool while the service
-# retains the session-scoped repository URL, PAT, and branch convention.
-class _ConfirmationInput(BaseModel):
-    """Avoid an empty-object schema, which Groq rejects after CrewAI conversion."""
-
-    confirm: str = Field(description="Set this to the exact string 'yes' to confirm this operation.")
-
-
-class _FilePathInput(BaseModel):
-    file_path: str = Field(description="A safe relative path inside the repository.")
-
-
-class _WriteFileInput(BaseModel):
-    file_path: str = Field(description="A safe relative path inside the repository.")
-    content: str = Field(description="The complete replacement content for that file.")
-
-
-class _CommandInput(BaseModel):
-    command: str = Field(description="One approved command: pytest, python -m pytest, ruff check, or black --check.")
-
-
-class _PullRequestInput(BaseModel):
-    title: str = Field(description="A concise pull request title.")
-    body: str = Field(description="A markdown pull request description.")
-
-
-class _SandboxOperationTool(BaseTool):
-    _service: GithubTool = PrivateAttr()
-
-    def __init__(self, *, service: GithubTool, **kwargs: object) -> None:
-        super().__init__(**kwargs)
-        self._service = service
-
-
-class CloneRepositoryTool(_SandboxOperationTool):
-    name: str = "clone_repository"
-    description: str = "Clone the configured GitHub repository into the isolated sandbox. Call this before any other repository operation with confirm='yes'."
-    args_schema: type[BaseModel] = _ConfirmationInput
-
-    def _run(self, confirm: str) -> str:
-        _require_confirmation(confirm)
-        return self._service._run("clone")
-
-
-class ListRepositoryFilesTool(_SandboxOperationTool):
-    name: str = "list_repository_files"
-    description: str = "List non-git files in the already-cloned isolated repository. Call with confirm='yes'."
-    args_schema: type[BaseModel] = _ConfirmationInput
-
-    def _run(self, confirm: str) -> str:
-        _require_confirmation(confirm)
-        return self._service._run("list_files")
-
-
-class ReadRepositoryFileTool(_SandboxOperationTool):
-    name: str = "read_repository_file"
-    description: str = "Read one safe relative file from the already-cloned isolated repository."
-    args_schema: type[BaseModel] = _FilePathInput
-
-    def _run(self, file_path: str) -> str:
-        return self._service._run("read_file", file_path=file_path)
-
-
-class WriteRepositoryFileTool(_SandboxOperationTool):
-    name: str = "write_repository_file"
-    description: str = "Write complete content to one safe relative file in the isolated repository."
-    args_schema: type[BaseModel] = _WriteFileInput
-
-    def _run(self, file_path: str, content: str) -> str:
-        return self._service._run("write_file", file_path=file_path, content=content)
-
-
-class RunRepositoryChecksTool(_SandboxOperationTool):
-    name: str = "run_repository_checks"
-    description: str = "Run one approved test or lint command in the isolated repository with network disabled."
-    args_schema: type[BaseModel] = _CommandInput
-
-    def _run(self, command: str) -> str:
-        return self._service._run("run_command", command=command)
-
-
-class PushRepositoryBranchTool(_SandboxOperationTool):
-    name: str = "push_repository_branch"
-    description: str = "Commit all reviewed changes and push the preconfigured agentforge branch. Call with confirm='yes'."
-    args_schema: type[BaseModel] = _ConfirmationInput
-
-    def _run(self, confirm: str) -> str:
-        _require_confirmation(confirm)
-        return self._service._run("push_branch", branch_name=self._service._safe_branch(f"agentforge/{self._service._session_id[:8]}"))
-
-
-class CreatePullRequestTool(_SandboxOperationTool):
-    name: str = "create_pull_request"
-    description: str = "Open a pull request from the preconfigured pushed agentforge branch."
-    args_schema: type[BaseModel] = _PullRequestInput
-
-    def _run(self, title: str, body: str) -> str:
-        branch = self._service._safe_branch(f"agentforge/{self._service._session_id[:8]}")
-        return self._service._run("create_pull_request", branch_name=branch, title=title, body=body)
-
-
-def create_github_operation_tools(service: GithubTool) -> dict[str, BaseTool]:
-    """Return operation-specific wrappers for use in a CrewAI agent definition."""
-    return {
-        "clone": CloneRepositoryTool(service=service),
-        "list": ListRepositoryFilesTool(service=service),
-        "read": ReadRepositoryFileTool(service=service),
-        "write": WriteRepositoryFileTool(service=service),
-        "checks": RunRepositoryChecksTool(service=service),
-        "push": PushRepositoryBranchTool(service=service),
-        "pr": CreatePullRequestTool(service=service),
-    }
-
-
-def _require_confirmation(confirm: str) -> None:
-    if confirm.strip().lower() != "yes":
-        raise ValueError("Set confirm to 'yes' to run this repository operation.")

@@ -1,17 +1,26 @@
-"""Research workflow: deterministic retrieval followed by CrewAI synthesis."""
+"""Research workflow: deterministic retrieval followed by a direct LLM synthesis call."""
 
 from __future__ import annotations
 
-from crewai import Agent, Crew, LLM, Process, Task
-
 from backend.config import Settings
-from backend.crewai_compat import disable_unsupported_cache_breakpoints
+from backend.llm_fallback import build_llm_candidates, complete_with_fallback
 
 
-def create_search_crew(prompt: str, context: str, sources: list[dict[str, str]], settings: Settings) -> Crew:
-    disable_unsupported_cache_breakpoints()
-    llm = LLM(model=f"groq/{settings.groq_model}", api_key=settings.groq_api_key, temperature=0.2)
-    synthesizer = Agent(role="Research Synthesizer", goal="Answer accurately using only the supplied search results.", backstory="You turn short public-web search extracts into concise, transparent research summaries.", llm=llm, verbose=False)
+def run_search_synthesis(prompt: str, context: str, sources: list[dict[str, str]], settings: Settings) -> str:
     source_text = "\n\n".join(f"Title: {item['title']}\nURL: {item['url']}\nSnippet: {item['snippet']}" for item in sources)
-    task = Task(description=f"Answer the request: {prompt}\nContext: {context or 'None'}\n\nUse only these search results:\n{source_text}\n\nDo not invent citations or facts. Clearly mark any recommendation or inference.", expected_output="A concise markdown answer grounded only in the supplied source snippets.", agent=synthesizer)
-    return Crew(agents=[synthesizer], tasks=[task], process=Process.sequential, verbose=False)
+    system_prompt = (
+        "You turn short public-web search extracts into concise, transparent research summaries. "
+        "Give the best grounded answer you can from these snippets, even if none of them states the "
+        "answer word-for-word — extract and combine what's actually relevant instead of demanding an "
+        "exact literal match. Only refuse to answer if the snippets are genuinely unrelated to the "
+        "request; if the match is partial or approximate, answer with that content and say so "
+        "explicitly (e.g. 'the closest information available is ...') rather than declining outright. "
+        "Do not invent citations or facts, and clearly mark any recommendation or inference."
+    )
+    user_prompt = f"Answer the request: {prompt}\nContext: {context or 'None'}\n\nUse only these search results:\n{source_text}"
+    response = complete_with_fallback(
+        build_llm_candidates(settings),
+        temperature=0.2,
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+    )
+    return response.choices[0].message.content or ""

@@ -1,31 +1,26 @@
-"""A normalized DuckDuckGo search tool for AgentForge research tasks."""
+"""A normalized DuckDuckGo search tool for AgentForge research/booking tasks."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from crewai.tools import BaseTool
 from ddgs import DDGS
-from pydantic import BaseModel, Field
 
 
 class SearchUnavailable(RuntimeError):
     """A provider failure that is safe to expose to the UI."""
 
 
-class WebSearchInput(BaseModel):
-    query: str = Field(description="A focused public-web search query.")
-    max_results: int = Field(default=5, ge=1, le=5)
+NAME = "web_search"
+DESCRIPTION = "Search the public web and return concise, normalized results."
+SCHEMA = {
+    "type": "object",
+    "properties": {"query": {"type": "string", "description": "A focused public-web search query."}},
+    "required": ["query"],
+}
 
 
-class WebSearchTool(BaseTool):
-    name: str = "web_search"
-    description: str = "Search the public web and return concise, normalized results."
-    args_schema: type[BaseModel] = WebSearchInput
-
-    def _run(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
-        return self.search(query, max_results)
-
+class WebSearchTool:
     @staticmethod
     def search(query: str, max_results: int = 5) -> list[dict[str, str]]:
         cleaned_query = query.strip()
@@ -56,3 +51,10 @@ class WebSearchTool(BaseTool):
         title = " ".join(str(item.get("title") or "Untitled result").split())
         snippet = " ".join(str(item.get("body") or item.get("snippet") or "").split())
         return {"title": title, "url": url, "snippet": snippet}
+
+    @staticmethod
+    def as_text(results: list[dict[str, str]]) -> str:
+        """Render search results as plain text for an LLM tool response."""
+        if not results:
+            return "No results found."
+        return "\n\n".join(f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['snippet']}" for r in results)
