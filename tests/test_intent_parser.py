@@ -25,7 +25,12 @@ def test_parses_research_intent_from_model_json():
 def test_forces_email_requests_to_draft_only():
     result = IntentParser(client=FakeClient([])).parse("Send email to the launch team")
     assert result.intent == "draft_email"
-    assert "cannot send" in result.reason
+    assert "connect gmail" in result.reason.lower()
+
+
+def test_forces_send_requests_to_send_email_with_gmail_connected():
+    result = IntentParser(client=FakeClient([])).parse("Send email to the launch team", has_gmail_context=True)
+    assert result.intent == "send_email"
 
 
 def test_retries_invalid_json_then_falls_back():

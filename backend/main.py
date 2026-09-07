@@ -10,11 +10,13 @@ from queue import Empty
 from threading import Thread
 from typing import Callable, TypeVar
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from backend.auth.google_oauth import exchange_code_for_tokens, get_auth_url
+from backend.auth.token_store import get_token_store
 from backend.config import get_settings
 from backend.crew_engine import CrewEngine
 from backend.event_emitter import EventEmitter
@@ -32,6 +34,11 @@ class TaskRequest(BaseModel):
     # with the same value continue committing to the same branch/PR; a fresh
     # value (or none) starts a new branch. Unrelated to the per-request task id.
     session_id: str = Field(default="", max_length=100)
+    # Client-generated identifier for this browser's connected Gmail account
+    # (see /auth/google below) — unrelated to session_id above, which is
+    # GitHub-specific. Sending an email is only possible once this session id
+    # has a token stored for it; otherwise email requests stay draft-only.
+    gmail_session_id: str = Field(default="", max_length=100)
 
     def normalized_prompt(self) -> str:
         return self.prompt.strip()
@@ -40,7 +47,6 @@ class TaskRequest(BaseModel):
 def _validate_prompt(request: TaskRequest) -> str:
     prompt = request.normalized_prompt()
     if not prompt:
-        from fastapi import HTTPException
         raise HTTPException(status_code=422, detail="prompt cannot be blank")
     return prompt
 
@@ -68,13 +74,14 @@ def _call_with_retry(fn: Callable[[], T], emitter: EventEmitter, step: str, max_
     raise AssertionError("unreachable")  # loop always returns or raises above
 
 
-def _run_task(prompt: str, context: str, repo_url: str, github_token: str, session_id: str, emitter: EventEmitter) -> None:
+def _run_task(prompt: str, context: str, repo_url: str, github_token: str, session_id: str, gmail_session_id: str, emitter: EventEmitter) -> None:
     """Execute one task and guarantee its stream has a terminal event."""
     try:
         has_repo_context = bool(repo_url and github_token)
-        intent = _call_with_retry(lambda: IntentParser().parse(prompt, context, has_repo_context), emitter, "intent classification")
+        has_gmail_context = bool(gmail_session_id and get_token_store().has(gmail_session_id))
+        intent = _call_with_retry(lambda: IntentParser().parse(prompt, context, has_repo_context, has_gmail_context), emitter, "intent classification")
         emitter.emit("intent_detected", {"intent": intent.intent, "confidence": intent.confidence, "reason": intent.reason})
-        result = _call_with_retry(lambda: CrewEngine().run(intent, prompt, context, emitter, repo_url=repo_url, github_token=github_token, session_id=session_id), emitter, "workflow")
+        result = _call_with_retry(lambda: CrewEngine().run(intent, prompt, context, emitter, repo_url=repo_url, github_token=github_token, session_id=session_id, gmail_session_id=gmail_session_id), emitter, "workflow")
         emitter.emit("result", result)
         emitter.emit("task_completed", {"status": "completed"})
     except Exception as exc:
@@ -110,6 +117,31 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/auth/google")
+def google_auth_start(state: str) -> RedirectResponse:
+    settings = get_settings()
+    if not settings.google_client_id or not settings.google_client_secret:
+        raise HTTPException(status_code=503, detail="Gmail integration is not configured on this server.")
+    return RedirectResponse(get_auth_url(state, settings))
+
+
+@app.get("/auth/google/status")
+def google_auth_status(state: str) -> dict[str, bool]:
+    return {"connected": get_token_store().has(state)}
+
+
+@app.get("/auth/google/callback")
+def google_auth_callback(code: str, state: str) -> HTMLResponse:
+    settings = get_settings()
+    try:
+        credentials = exchange_code_for_tokens(code, settings)
+    except Exception:
+        logger.exception("Gmail OAuth callback failed: state=%s", state)
+        return HTMLResponse("<h3>Could not connect Gmail. Please close this tab and try again.</h3>", status_code=400)
+    get_token_store().save(state, credentials)
+    return HTMLResponse("<h3>Gmail connected. You can close this tab and return to AgentForge.</h3>")
+
+
 @app.post("/tasks/stream")
 async def stream_task(request: TaskRequest) -> StreamingResponse:
     prompt = _validate_prompt(request)
@@ -119,7 +151,7 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
     emitter.emit("task_started", {"prompt": prompt[:500]})
 
     def run_task() -> None:
-        _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), emitter)
+        _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), request.gmail_session_id.strip(), emitter)
 
     Thread(target=run_task, name=f"agentforge-{emitter.task_id}", daemon=True).start()
 
@@ -143,7 +175,7 @@ def run_task(request: TaskRequest) -> dict[str, list[dict]]:
     prompt = _validate_prompt(request)
     emitter = EventEmitter(str(uuid.uuid4()))
     emitter.emit("task_started", {"prompt": prompt[:500]})
-    _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), emitter)
+    _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), request.gmail_session_id.strip(), emitter)
     events: list[dict] = []
     while True:
         event = emitter.queue.get()

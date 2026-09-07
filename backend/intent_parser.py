@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from backend.config import Settings, get_settings
 from backend.llm_fallback import build_llm_candidates, is_rate_limited
 
-IntentName = Literal["research", "draft_email", "github", "booking", "unsupported"]
+IntentName = Literal["research", "draft_email", "send_email", "github", "booking", "unsupported"]
 
 
 class Intent(BaseModel):
@@ -26,9 +26,11 @@ class Intent(BaseModel):
 SYSTEM_PROMPT = (
     "You classify requests for an AgentForge agent application. Return JSON only, with keys "
     "intent, confidence, reason, task_summary, constraints. Valid intent values: research, "
-    "draft_email, github, booking, unsupported. research is for finding, comparing, explaining, or summarizing "
+    "draft_email, send_email, github, booking, unsupported. research is for finding, comparing, explaining, or summarizing "
     "public information. draft_email is for writing or revising an email; no email can be sent "
-    "in this phase. github is for repository changes, tests, branches, or pull requests. "
+    "in this phase. send_email is for actually sending an email through a connected Gmail account "
+    "(only ever choose this if the user clearly wants the email sent, not merely drafted). "
+    "github is for repository changes, tests, branches, or pull requests. "
     "booking is for browser automation on public websites: reservations, checking availability, "
     "filling out a public form, or navigating a specific site and interacting with it (clicking, "
     "searching within the site, reading a resulting page) — even if the underlying goal looks like "
@@ -49,8 +51,8 @@ class IntentParser:
         # .choices[0].message.content, which is what litellm.completion itself returns.
         self._client = client or litellm.completion
 
-    def parse(self, prompt: str, context: str = "", has_repo_context: bool = False) -> Intent:
-        forced = self._forced_intent(prompt, has_repo_context)
+    def parse(self, prompt: str, context: str = "", has_repo_context: bool = False, has_gmail_context: bool = False) -> Intent:
+        forced = self._forced_intent(prompt, has_repo_context, has_gmail_context)
         if forced is not None:
             return forced
         settings = self._settings or get_settings()
@@ -60,7 +62,11 @@ class IntentParser:
             "writing, editing, testing, or otherwise changing a file or code, classify it as github "
             "even if it never says so explicitly." if has_repo_context else ""
         )
-        user_text = f"Request: {prompt}\\nContext: {context or '(none)'}{repo_note}"
+        gmail_note = (
+            "\\nNote: The user has connected a Gmail account for this session. If the request clearly "
+            "asks to send (not merely draft) an email, classify it as send_email." if has_gmail_context else ""
+        )
+        user_text = f"Request: {prompt}\\nContext: {context or '(none)'}{repo_note}{gmail_note}"
         # Two independent failure modes, handled differently: a malformed
         # JSON reply (successful call, bad content) gets a corrective retry
         # on the *same* candidate, up to 2 attempts — unrelated to which
@@ -105,9 +111,19 @@ class IntentParser:
     _NAV_VERB_PATTERN = re.compile(r"\b(?:go to|navigate to|open|visit)\s+([a-z0-9][\w.:/-]*)")
     _GENERIC_NAV_TARGETS = {"a", "an", "the", "up", "this", "that", "it", "new", "my", "your", "some", "another", "file", "files"}
 
+    # Phrases where the user unambiguously wants the email actually sent, not
+    # just drafted. Checked before the draft-shaped phrases below since
+    # "send an email to bob@x.com" would otherwise also match "email to".
+    _SEND_EMAIL_PATTERNS = ("send email", "send an email", "send a mail", "send this email", "schedule email")
+
     @classmethod
-    def _forced_intent(cls, prompt: str, has_repo_context: bool = False) -> Intent | None:
-        text = prompt.lower()
+    def _forced_intent(cls, prompt: str, has_repo_context: bool = False, has_gmail_context: bool = False) -> Intent | None:
+        # Collapse whitespace before matching fixed phrases below — otherwise
+        # an incidental double space (e.g. "send  this email") breaks a
+        # literal substring match like "send this email" and falls through
+        # to a weaker pattern ("email to") that forces draft_email regardless
+        # of Gmail connection state.
+        text = re.sub(r"\s+", " ", prompt.lower())
         if any(word in text for word in ("github", "pull request", "clone repo", "repository", "repo ", "repo.")):
             return Intent(intent="github", confidence=0.98, reason="This request requires AgentForge's GitHub repository workflow.", task_summary="GitHub repository task")
         if any(word in text for word in ("log in", "log into", "payment", "credit card", "pay for")):
@@ -129,6 +145,10 @@ class IntentParser:
             return Intent(intent="booking", confidence=0.95, reason="This request names a specific site or page to open and interact with.", task_summary="Browser automation / booking task")
         if any(word in text for word in ("browser", "book a", "booking", "reservation", "reserve a", "check availability")):
             return Intent(intent="booking", confidence=0.95, reason="This request requires AgentForge's browser automation workflow.", task_summary="Browser automation / booking task")
-        if any(word in text for word in ("send email", "schedule email", "write an email", "draft an email", "email to")):
-            return Intent(intent="draft_email", confidence=0.95, reason="Phase 1 can create an email draft but cannot send or schedule it.", task_summary="Create an email draft")
+        if any(phrase in text for phrase in cls._SEND_EMAIL_PATTERNS):
+            if has_gmail_context:
+                return Intent(intent="send_email", confidence=0.95, reason="A Gmail account is connected for this session and this request asks to send an email.", task_summary="Send an email")
+            return Intent(intent="draft_email", confidence=0.9, reason="No Gmail account is connected for this session, so AgentForge can only draft this email. Connect Gmail in the sidebar to send it.", task_summary="Create an email draft")
+        if any(word in text for word in ("write an email", "draft an email", "email to")):
+            return Intent(intent="draft_email", confidence=0.95, reason="This request asks to draft an email.", task_summary="Create an email draft")
         return None

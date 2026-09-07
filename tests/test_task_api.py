@@ -11,7 +11,7 @@ def test_json_task_endpoint_returns_ordered_events(monkeypatch):
     monkeypatch.setattr(
         main.IntentParser,
         "parse",
-        lambda _self, _prompt, _context, _has_repo_context=False: Intent(
+        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: Intent(
             intent="unsupported", confidence=1, reason="test", task_summary="test"
         ),
     )
@@ -33,9 +33,9 @@ def test_rate_limited_task_has_a_clear_retryable_event(monkeypatch):
     class RateLimitError(Exception):
         pass
 
-    monkeypatch.setattr(main.IntentParser, "parse", lambda *_args: (_ for _ in ()).throw(RateLimitError("rate_limit_exceeded")))
+    monkeypatch.setattr(main.IntentParser, "parse", lambda *_args, **_kwargs: (_ for _ in ()).throw(RateLimitError("rate_limit_exceeded")))
     emitter = EventEmitter("test-rate-limit")
-    main._run_task("Research something", "", "", "", "", emitter)
+    main._run_task("Research something", "", "", "", "", "", emitter)
     events = []
     while True:
         event = emitter.queue.get()

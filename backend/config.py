@@ -40,6 +40,19 @@ class Settings:
     backend_base_url: str = "http://localhost:8000"
     streamlit_port: int = 8501
     sandbox_image: str = "agentforge-sandbox:local"
+    # Gmail OAuth2 (Phase 3). Optional — unset means the /auth/google routes
+    # respond with a clear "not configured" error rather than failing
+    # startup, since not every deployment needs email sending.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_redirect_uri: str = "http://localhost:8000/auth/google/callback"
+    # Optional — unset means Gmail tokens stay in the process-memory TokenStore
+    # (erased on backend restart, never shared across instances). Set this to
+    # move them to Redis instead, so a connected user's token expires on its
+    # own schedule (gmail_token_ttl_seconds, sliding on each use) rather than
+    # only ever being erased by chance of a restart.
+    redis_url: str = ""
+    gmail_token_ttl_seconds: int = 86400
 
 
 @lru_cache(maxsize=1)
@@ -75,4 +88,9 @@ def get_settings() -> Settings:
         backend_base_url=os.getenv("BACKEND_BASE_URL", "http://localhost:8000"),
         streamlit_port=streamlit_port,
         sandbox_image=os.getenv("SANDBOX_IMAGE", "agentforge-sandbox:local").strip(),
+        google_client_id=os.getenv("GOOGLE_CLIENT_ID", "").strip(),
+        google_client_secret=os.getenv("GOOGLE_CLIENT_SECRET", "").strip(),
+        google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback").strip(),
+        redis_url=os.getenv("REDIS_URL", "").strip(),
+        gmail_token_ttl_seconds=int(os.getenv("GMAIL_TOKEN_TTL_SECONDS", "86400")),
     )
