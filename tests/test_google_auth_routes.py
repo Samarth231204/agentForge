@@ -60,3 +60,30 @@ def test_auth_callback_reports_failure_without_saving(monkeypatch):
     response = client.get("/auth/google/callback", params={"code": "bad-code", "state": "session-3"})
     assert response.status_code == 400
     assert not get_token_store().has("session-3")
+
+
+class _ExplodingTokenStore:
+    def has(self, *_a, **_k):
+        raise RuntimeError("Redis is down")
+
+    def save(self, *_a, **_k):
+        raise RuntimeError("Redis is down")
+
+
+def test_auth_status_degrades_to_not_connected_when_the_store_is_unreachable(monkeypatch):
+    client, main = _client(monkeypatch)
+    monkeypatch.setattr(main, "get_token_store", lambda: _ExplodingTokenStore())
+
+    response = client.get("/auth/google/status", params={"state": "session-4"})
+    assert response.status_code == 200
+    assert response.json() == {"connected": False}
+
+
+def test_auth_callback_reports_a_clear_error_when_saving_fails(monkeypatch):
+    client, main = _client(monkeypatch)
+    monkeypatch.setattr(main, "exchange_code_for_tokens", lambda code, settings: {"token": "abc"})
+    monkeypatch.setattr(main, "get_token_store", lambda: _ExplodingTokenStore())
+
+    response = client.get("/auth/google/callback", params={"code": "auth-code", "state": "session-5"})
+    assert response.status_code == 503
+    assert "could not save" in response.text.lower()

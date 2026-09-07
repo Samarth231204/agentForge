@@ -21,6 +21,10 @@ DEFAULTS = {
     # a completed Gmail OAuth connection (stored server-side, keyed by this
     # id) stays associated with this browser across queries.
     "gmail_session_id": "",
+    # Generated once per browser session (Phase 4), same shape as
+    # gmail_session_id — used only as a lookup key for this session's task
+    # history stored server-side (backend/history_store.py).
+    "history_session_id": "",
 }
 
 

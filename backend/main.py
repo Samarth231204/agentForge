@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from queue import Empty
 from threading import Thread
 from typing import Callable, TypeVar
@@ -19,8 +20,11 @@ from backend.auth.google_oauth import exchange_code_for_tokens, get_auth_url
 from backend.auth.token_store import get_token_store
 from backend.config import get_settings
 from backend.crew_engine import CrewEngine
+from backend.critic_agent import run_critic
 from backend.event_emitter import EventEmitter
+from backend.history_store import get_history_store
 from backend.intent_parser import IntentParser
+from backend.memory_manager import get_memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,10 @@ class TaskRequest(BaseModel):
     # GitHub-specific. Sending an email is only possible once this session id
     # has a token stored for it; otherwise email requests stay draft-only.
     gmail_session_id: str = Field(default="", max_length=100)
+    # Client-generated identifier for this browser session's task history
+    # (Phase 4). Unrelated to session_id/gmail_session_id above — used only
+    # to look up/append entries in history_store, never for GitHub or Gmail.
+    history_session_id: str = Field(default="", max_length=100)
 
     def normalized_prompt(self) -> str:
         return self.prompt.strip()
@@ -74,16 +82,69 @@ def _call_with_retry(fn: Callable[[], T], emitter: EventEmitter, step: str, max_
     raise AssertionError("unreachable")  # loop always returns or raises above
 
 
-def _run_task(prompt: str, context: str, repo_url: str, github_token: str, session_id: str, gmail_session_id: str, emitter: EventEmitter) -> None:
+# Intents whose result text is safe to remember as a personal preference —
+# narrowed deliberately (Phase 4): send_email/github/booking have real side
+# effects (a sent email, a pushed commit, a browser action) where a stale
+# injected memory silently changing behavior is a real correctness risk.
+# Recall/remember for those is left as explicit future work, not this phase.
+_MEMORY_ELIGIBLE_INTENTS = {"research", "draft_email"}
+
+
+def _record_task_side_effects(prompt: str, result: dict, history_session_id: str, gmail_session_id: str, session_id: str, task_id: str) -> None:
+    """Best-effort: task history, agent memory, and the critic's lesson
+    extraction, run in a background thread after the user-facing response is
+    already complete. None of this may ever affect the task it's reviewing —
+    every step is independently wrapped so one failing (e.g. Mem0 or Redis
+    down) never blocks the others."""
+    intent = result.get("intent", "")
+    content = result.get("content", "")
+
+    if history_session_id:
+        try:
+            entry = {
+                "task_id": task_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "intent": intent,
+                "prompt": prompt[:500],
+                "content": content[:2000],
+                "sources": result.get("sources", []),
+            }
+            get_history_store().append(history_session_id, entry)
+        except Exception:
+            logger.warning("Recording task history failed: task_id=%s", task_id, exc_info=True)
+
+    user_id = gmail_session_id or session_id or "anonymous"
+    if intent in _MEMORY_ELIGIBLE_INTENTS:
+        try:
+            get_memory_manager().remember(f"prefs:{user_id}", f"User asked: {prompt[:500]}\nAgentForge answered: {content[:500]}")
+        except Exception:
+            logger.warning("Writing agent memory failed: task_id=%s", task_id, exc_info=True)
+
+    try:
+        settings = get_settings()
+        lesson = run_critic(prompt, intent, content, settings)
+        if lesson:
+            get_memory_manager().remember("lessons:global", lesson)
+    except Exception:
+        logger.warning("Critic review failed: task_id=%s", task_id, exc_info=True)
+
+
+def _run_task(prompt: str, context: str, repo_url: str, github_token: str, session_id: str, gmail_session_id: str, history_session_id: str, emitter: EventEmitter) -> None:
     """Execute one task and guarantee its stream has a terminal event."""
     try:
         has_repo_context = bool(repo_url and github_token)
-        has_gmail_context = bool(gmail_session_id and get_token_store().has(gmail_session_id))
+        has_gmail_context = _is_gmail_connected(gmail_session_id)
         intent = _call_with_retry(lambda: IntentParser().parse(prompt, context, has_repo_context, has_gmail_context), emitter, "intent classification")
         emitter.emit("intent_detected", {"intent": intent.intent, "confidence": intent.confidence, "reason": intent.reason})
         result = _call_with_retry(lambda: CrewEngine().run(intent, prompt, context, emitter, repo_url=repo_url, github_token=github_token, session_id=session_id, gmail_session_id=gmail_session_id), emitter, "workflow")
         emitter.emit("result", result)
         emitter.emit("task_completed", {"status": "completed"})
+        Thread(
+            target=_record_task_side_effects,
+            args=(prompt, result, history_session_id, gmail_session_id, session_id, emitter.task_id),
+            name=f"agentforge-side-effects-{emitter.task_id}",
+            daemon=True,
+        ).start()
     except Exception as exc:
         if CrewEngine._is_rate_limited(exc):
             logger.warning("AgentForge LLM rate limited: task_id=%s error=%s", emitter.task_id, exc)
@@ -125,9 +186,22 @@ def google_auth_start(state: str) -> RedirectResponse:
     return RedirectResponse(get_auth_url(state, settings))
 
 
+def _is_gmail_connected(gmail_session_id: str) -> bool:
+    """A token-store outage must read as "not connected" (a safe default —
+    never falsely claim a connection exists), not crash the caller. Shared
+    by the status route and _run_task's intent-classification hint below."""
+    if not gmail_session_id:
+        return False
+    try:
+        return get_token_store().has(gmail_session_id)
+    except Exception:
+        logger.warning("Checking Gmail connection status failed: gmail_session_id=%s", gmail_session_id, exc_info=True)
+        return False
+
+
 @app.get("/auth/google/status")
 def google_auth_status(state: str) -> dict[str, bool]:
-    return {"connected": get_token_store().has(state)}
+    return {"connected": _is_gmail_connected(state)}
 
 
 @app.get("/auth/google/callback")
@@ -138,8 +212,24 @@ def google_auth_callback(code: str, state: str) -> HTMLResponse:
     except Exception:
         logger.exception("Gmail OAuth callback failed: state=%s", state)
         return HTMLResponse("<h3>Could not connect Gmail. Please close this tab and try again.</h3>", status_code=400)
-    get_token_store().save(state, credentials)
+    try:
+        get_token_store().save(state, credentials)
+    except Exception:
+        logger.exception("Saving the Gmail token failed: state=%s", state)
+        return HTMLResponse("<h3>Google approved the connection, but AgentForge could not save it. Please try again.</h3>", status_code=503)
     return HTMLResponse("<h3>Gmail connected. You can close this tab and return to AgentForge.</h3>")
+
+
+@app.get("/history")
+def get_history(state: str) -> dict[str, list[dict]]:
+    # History is a best-effort side channel, same posture as the background
+    # write in _record_task_side_effects — a Redis outage on the read side
+    # must degrade to "no history available" too, not a 500.
+    try:
+        return {"tasks": get_history_store().list(state)}
+    except Exception:
+        logger.warning("Fetching task history failed: state=%s", state, exc_info=True)
+        return {"tasks": []}
 
 
 @app.post("/tasks/stream")
@@ -151,7 +241,7 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
     emitter.emit("task_started", {"prompt": prompt[:500]})
 
     def run_task() -> None:
-        _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), request.gmail_session_id.strip(), emitter)
+        _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), request.gmail_session_id.strip(), request.history_session_id.strip(), emitter)
 
     Thread(target=run_task, name=f"agentforge-{emitter.task_id}", daemon=True).start()
 
@@ -175,7 +265,7 @@ def run_task(request: TaskRequest) -> dict[str, list[dict]]:
     prompt = _validate_prompt(request)
     emitter = EventEmitter(str(uuid.uuid4()))
     emitter.emit("task_started", {"prompt": prompt[:500]})
-    _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), request.gmail_session_id.strip(), emitter)
+    _run_task(prompt, request.context.strip(), request.repo_url.strip(), request.github_token.strip(), request.session_id.strip(), request.gmail_session_id.strip(), request.history_session_id.strip(), emitter)
     events: list[dict] = []
     while True:
         event = emitter.queue.get()

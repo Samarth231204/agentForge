@@ -18,8 +18,10 @@ st.set_page_config(page_title="AgentForge", page_icon="⚒️", layout="wide")
 initialize_state()
 if not st.session_state.gmail_session_id:
     st.session_state.gmail_session_id = uuid.uuid4().hex
+if not st.session_state.history_session_id:
+    st.session_state.history_session_id = uuid.uuid4().hex
 
-backend_url, repo_url, github_token, reset_requested, new_branch_requested = render_sidebar(st.session_state.gmail_session_id)
+backend_url, repo_url, github_token, reset_requested, new_branch_requested = render_sidebar(st.session_state.gmail_session_id, st.session_state.history_session_id)
 if reset_requested:
     reset_state()
     st.rerun()
@@ -49,7 +51,7 @@ if submitted:
             st.session_state.github_session_repo = repo_url_stripped
         connection_slot.info("Connecting to AgentForge…")
         try:
-            for event in stream_task(backend_url, prompt.strip(), context.strip(), repo_url_stripped, github_token.strip(), st.session_state.github_session_id, st.session_state.gmail_session_id):
+            for event in stream_task(backend_url, prompt.strip(), context.strip(), repo_url_stripped, github_token.strip(), st.session_state.github_session_id, st.session_state.gmail_session_id, st.session_state.history_session_id):
                 connection_slot.empty()
                 st.session_state.events.append(event)
                 if event.get("type") == "result":

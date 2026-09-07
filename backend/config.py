@@ -53,6 +53,11 @@ class Settings:
     # only ever being erased by chance of a restart.
     redis_url: str = ""
     gmail_token_ttl_seconds: int = 86400
+    # Mem0 (Phase 4). Optional — unset means agent memory/recall and critic
+    # lessons are simply disabled (recall calls return nothing, remember
+    # calls are no-ops); no code changes needed to start using it later.
+    # Free tier at https://app.mem0.ai.
+    mem0_api_key: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -93,4 +98,5 @@ def get_settings() -> Settings:
         google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback").strip(),
         redis_url=os.getenv("REDIS_URL", "").strip(),
         gmail_token_ttl_seconds=int(os.getenv("GMAIL_TOKEN_TTL_SECONDS", "86400")),
+        mem0_api_key=os.getenv("MEM0_API_KEY", "").strip(),
     )

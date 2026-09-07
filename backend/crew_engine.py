@@ -10,6 +10,7 @@ from backend.auth.token_store import get_token_store
 from backend.config import Settings, get_settings
 from backend.event_emitter import EventEmitter
 from backend.intent_parser import Intent
+from backend.memory_manager import get_memory_manager
 from backend.templates.booking_crew import build_booking_tools, run_booking_workflow
 from backend.templates.email_crew import DRAFT_NOTICE, extract_recipient, run_email_workflow, run_send_email_workflow
 from backend.templates.github_crew import run_github_workflow
@@ -27,14 +28,34 @@ class CrewEngine:
             message = f"{intent.reason} AgentForge can research public information, draft an email, work on a GitHub repository, or run a browser-automation/booking task."
             return {"intent": "unsupported", "content": message, "sources": []}
         if intent.intent == "draft_email":
-            return self._run_email(prompt, context, emitter)
+            return self._run_email(prompt, context, session_id, gmail_session_id, emitter)
         if intent.intent == "send_email":
             return self._run_send_email(prompt, context, gmail_session_id, emitter)
         if intent.intent == "github":
             return self._run_github(intent.task_summary, prompt, repo_url, github_token, session_id, emitter)
         if intent.intent == "booking":
             return self._run_booking(prompt, context, emitter)
-        return self._run_research(prompt, context, emitter)
+        return self._run_research(prompt, context, session_id, gmail_session_id, emitter)
+
+    @staticmethod
+    def _recall_context(prompt: str, context: str, session_id: str, gmail_session_id: str) -> str:
+        """Append remembered personal preferences and critic-extracted
+        lessons onto an existing context string — memory recall reuses this
+        existing prompt input rather than adding a new one. Best-effort: a
+        Mem0 outage never raises, it just contributes nothing (see
+        NullMemoryManager / Mem0MemoryManager's own exception handling)."""
+        user_id = gmail_session_id or session_id or "anonymous"
+        memory = get_memory_manager()
+        personal = memory.recall(f"prefs:{user_id}", prompt, limit=3)
+        lessons = memory.recall("lessons:global", prompt, limit=2)
+        extra_lines = []
+        if personal:
+            extra_lines.append(f"Remembered from past sessions: {'; '.join(personal)}")
+        if lessons:
+            extra_lines.append(f"Lessons learned: {'; '.join(lessons)}")
+        if not extra_lines:
+            return context
+        return f"{context}\n{chr(10).join(extra_lines)}".strip()
 
     def _run_github(self, task_summary: str, prompt: str, repo_url: str, github_token: str, session_id: str, emitter: EventEmitter) -> dict[str, Any]:
         if not repo_url or not github_token:
@@ -72,11 +93,12 @@ class CrewEngine:
             return 30.0
         return 5.0
 
-    def _run_email(self, prompt: str, context: str, emitter: EventEmitter) -> dict[str, Any]:
+    def _run_email(self, prompt: str, context: str, session_id: str, gmail_session_id: str, emitter: EventEmitter) -> dict[str, Any]:
         agents = ["Email Planner", "Email Writer", "Email Reviewer"]
         emitter.emit("workflow_started", {"workflow": "email_crew", "agents": agents})
         for agent, role in zip(agents, ("planning", "drafting", "reviewing")):
             emitter.emit("agent_started", {"agent": agent, "role": role})
+        context = self._recall_context(prompt, context, session_id, gmail_session_id)
         output = run_email_workflow(prompt, context, self.settings)
         if DRAFT_NOTICE not in output:
             output = f"{output.rstrip()}\n\n{DRAFT_NOTICE}"
@@ -122,7 +144,7 @@ class CrewEngine:
         emitter.emit("agent_completed", {"agent": "Booking Agent", "summary": "Completed the browser-automation task."})
         return {"intent": "booking", "content": output, "sources": []}
 
-    def _run_research(self, prompt: str, context: str, emitter: EventEmitter) -> dict[str, Any]:
+    def _run_research(self, prompt: str, context: str, session_id: str, gmail_session_id: str, emitter: EventEmitter) -> dict[str, Any]:
         emitter.emit("workflow_started", {"workflow": "search_flow", "agents": ["Researcher", "Research Synthesizer"]})
         emitter.emit("agent_started", {"agent": "Researcher", "role": "web research"})
         emitter.emit("tool_started", {"tool": "web_search", "input_summary": prompt[:500]})
@@ -136,6 +158,7 @@ class CrewEngine:
         if not sources:
             return {"intent": "research", "content": "I could not find reliable public-web results for that request.", "sources": []}
         emitter.emit("agent_started", {"agent": "Research Synthesizer", "role": "source-grounded synthesis"})
+        context = self._recall_context(prompt, context, session_id, gmail_session_id)
         output = run_search_synthesis(prompt, context, sources, self.settings)
         emitter.emit("agent_completed", {"agent": "Research Synthesizer", "summary": "Created a source-grounded answer."})
         return {"intent": "research", "content": output, "sources": [item["url"] for item in sources]}
