@@ -16,9 +16,13 @@ class FakePage:
     def __init__(self):
         self.goto_calls = []
         self.title_value = "Example Domain"
+        self.body_text_value = "  lots   of   whitespace   " + ("x" * 5000)
 
     def goto(self, url, **_kwargs):
         self.goto_calls.append(url)
+
+    def wait_for_timeout(self, _ms):
+        pass
 
     def title(self):
         return self.title_value
@@ -30,7 +34,13 @@ class FakePage:
         self.filled = (selector, text)
 
     def inner_text(self, selector, **_kwargs):
-        return "  lots   of   whitespace   " + ("x" * 5000)
+        return self.body_text_value if selector == "body" else "  lots   of   whitespace   " + ("x" * 5000)
+
+    def eval_on_selector_all(self, selector, _expression):
+        self.eval_selector = selector
+        if selector == "empty":
+            return []
+        return [{"text": "First video title", "href": "https://example.com/watch?v=1"}, {"text": "", "href": "https://example.com/watch?v=2"}]
 
 
 class FakeBrowser:
@@ -109,6 +119,50 @@ def test_get_text_is_collapsed_and_capped(monkeypatch):
     assert "  " not in result
     assert len(result) <= 3000 + len("...[truncated]")
     assert result.endswith("...[truncated]")
+
+
+def test_navigate_warns_when_the_page_is_still_empty_after_settling(monkeypatch):
+    # Reproduces the real bug: a JS-heavy SPA (e.g. YouTube) hasn't rendered
+    # anything yet right after navigation, and an agent handed an empty
+    # result here was observed fabricating plausible-looking facts instead
+    # of retrying — navigate must say so explicitly rather than reporting
+    # success silently.
+    page, _browser, _context = _install_fake_playwright(monkeypatch)
+    page.title_value = ""
+    page.body_text_value = ""
+    tool = BrowserTool()
+    result = tool.run("navigate", url="https://example.com")
+    assert "appears empty" in result
+    assert "do not answer from general knowledge" in result
+
+
+def test_navigate_reports_normally_when_content_is_present(monkeypatch):
+    _install_fake_playwright(monkeypatch)
+    tool = BrowserTool()
+    result = tool.run("navigate", url="https://example.com")
+    assert result == "Navigated to https://example.com. Title: Example Domain"
+
+
+def test_get_links_returns_text_and_real_href(monkeypatch):
+    _install_fake_playwright(monkeypatch)
+    tool = BrowserTool()
+    result = tool.run("get_links", selector="a.video-title")
+    assert "First video title -> https://example.com/watch?v=1" in result
+    assert "(no text) -> https://example.com/watch?v=2" in result
+
+
+def test_get_links_defaults_selector_to_all_anchors(monkeypatch):
+    page, _browser, _context = _install_fake_playwright(monkeypatch)
+    tool = BrowserTool()
+    tool.run("get_links", selector="")
+    assert page.eval_selector == "a"
+
+
+def test_get_links_reports_when_nothing_matches(monkeypatch):
+    _install_fake_playwright(monkeypatch)
+    tool = BrowserTool()
+    result = tool.run("get_links", selector="empty")
+    assert "No links matched" in result
 
 
 def test_close_tears_down_browser_and_playwright(monkeypatch):

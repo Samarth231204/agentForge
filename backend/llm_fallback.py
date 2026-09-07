@@ -37,6 +37,14 @@ from typing import TYPE_CHECKING, Any
 
 import litellm
 
+# LiteLLM prints a "Give Feedback / Get Help" banner to stderr on every
+# exception it catches internally, including ones this module's own
+# retry/fallback logic is designed to catch and recover from — that noise
+# made it hard to tell an expected, handled candidate failure apart from an
+# actual task failure in the logs. This module is imported by every
+# LLM-calling workflow, so setting it once here applies everywhere.
+litellm.suppress_debug_info = True
+
 if TYPE_CHECKING:
     from backend.config import Settings
 

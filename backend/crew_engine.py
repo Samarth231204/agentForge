@@ -6,13 +6,15 @@ import re
 import time
 from typing import Any
 
+from backend.auth.token_store import get_token_store
 from backend.config import Settings, get_settings
 from backend.event_emitter import EventEmitter
 from backend.intent_parser import Intent
 from backend.templates.booking_crew import build_booking_tools, run_booking_workflow
-from backend.templates.email_crew import DRAFT_NOTICE, run_email_workflow
+from backend.templates.email_crew import DRAFT_NOTICE, extract_recipient, run_email_workflow, run_send_email_workflow
 from backend.templates.github_crew import run_github_workflow
 from backend.templates.search_flow import run_search_synthesis
+from backend.tools.email_tool import GmailUnavailable, send_email
 from backend.tools.web_search_tool import SearchUnavailable, WebSearchTool
 
 
@@ -20,12 +22,14 @@ class CrewEngine:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
-    def run(self, intent: Intent, prompt: str, context: str, emitter: EventEmitter, *, repo_url: str = "", github_token: str = "", session_id: str = "") -> dict[str, Any]:
+    def run(self, intent: Intent, prompt: str, context: str, emitter: EventEmitter, *, repo_url: str = "", github_token: str = "", session_id: str = "", gmail_session_id: str = "") -> dict[str, Any]:
         if intent.intent == "unsupported":
             message = f"{intent.reason} AgentForge can research public information, draft an email, work on a GitHub repository, or run a browser-automation/booking task."
             return {"intent": "unsupported", "content": message, "sources": []}
         if intent.intent == "draft_email":
             return self._run_email(prompt, context, emitter)
+        if intent.intent == "send_email":
+            return self._run_send_email(prompt, context, gmail_session_id, emitter)
         if intent.intent == "github":
             return self._run_github(intent.task_summary, prompt, repo_url, github_token, session_id, emitter)
         if intent.intent == "booking":
@@ -79,6 +83,30 @@ class CrewEngine:
         for agent in agents:
             emitter.emit("agent_completed", {"agent": agent, "summary": "Completed its email-drafting stage."})
         return {"intent": "draft_email", "content": output, "sources": []}
+
+    def _run_send_email(self, prompt: str, context: str, gmail_session_id: str, emitter: EventEmitter) -> dict[str, Any]:
+        agents = ["Email Planner", "Email Writer", "Gmail Sender"]
+        emitter.emit("workflow_started", {"workflow": "send_email", "agents": agents})
+        if not gmail_session_id:
+            emitter.emit("error", {"code": "gmail_not_connected", "message": "Connect a Gmail account in the sidebar before sending an email.", "retryable": False})
+            return {"intent": "send_email", "content": "Connect a Gmail account in the sidebar before sending an email.", "sources": []}
+        recipient = extract_recipient(prompt) or extract_recipient(context)
+        if not recipient:
+            emitter.emit("error", {"code": "missing_recipient", "message": "No recipient email address was found in the request.", "retryable": False})
+            return {"intent": "send_email", "content": "I could not find a recipient email address in this request. Include the address you want to send to.", "sources": []}
+        for agent, role in zip(agents[:2], ("planning", "drafting")):
+            emitter.emit("agent_started", {"agent": agent, "role": role})
+        subject, body = run_send_email_workflow(prompt, context, self.settings)
+        for agent in agents[:2]:
+            emitter.emit("agent_completed", {"agent": agent, "summary": "Completed its email-drafting stage."})
+        emitter.emit("agent_started", {"agent": "Gmail Sender", "role": "sending via the connected Gmail account"})
+        try:
+            result = send_email(session_id=gmail_session_id, to=recipient, subject=subject, body=body, token_store=get_token_store())
+        except GmailUnavailable as exc:
+            emitter.emit("error", {"code": "gmail_send_failed", "message": str(exc), "retryable": True})
+            return {"intent": "send_email", "content": str(exc), "sources": []}
+        emitter.emit("agent_completed", {"agent": "Gmail Sender", "summary": result})
+        return {"intent": "send_email", "content": result, "sources": []}
 
     def _run_booking(self, prompt: str, context: str, emitter: EventEmitter) -> dict[str, Any]:
         agents = ["Booking Agent"]

@@ -18,13 +18,17 @@ class BrowserUnavailable(RuntimeError):
 NAME = "browser"
 DESCRIPTION = (
     "Control a real headless web browser to navigate public websites, click "
-    "elements, fill form fields, and read text directly off the rendered page. "
-    "Call navigate before any other action, and use get_text to read the page's "
-    "actual content — that is how you verify what happened, not by assuming. "
-    "Never enter payment card details, passwords, or other account credentials "
-    "into any field — stop and report if a task requires them. EVERY call must "
-    "include action, url, selector, and text; set every field not needed by "
-    "that action to an empty string."
+    "elements, fill form fields, and read text or links directly off the "
+    "rendered page. Call navigate before any other action. Use get_text to "
+    "read the page's actual content, and get_links to extract the real href "
+    "URL of anchor elements — get_text alone can never give you a link's "
+    "actual URL, only its visible text, so use get_links whenever a task "
+    "asks for a link/URL rather than guessing or giving up. That is how you "
+    "verify what happened, not by assuming. Never enter payment card "
+    "details, passwords, or other account credentials into any field — stop "
+    "and report if a task requires them. EVERY call must include action, "
+    "url, selector, and text; set every field not needed by that action to "
+    "an empty string."
 )
 # Every field is required in the schema, rather than optional with a default,
 # because Groq's tool-call validator rejects a call missing any
@@ -32,9 +36,9 @@ DESCRIPTION = (
 SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["navigate", "click", "fill", "get_text"], "description": "The browser operation to perform."},
+        "action": {"type": "string", "enum": ["navigate", "click", "fill", "get_text", "get_links"], "description": "The browser operation to perform."},
         "url": {"type": "string", "description": "URL for the navigate action, or an empty string."},
-        "selector": {"type": "string", "description": "CSS selector for click/fill/get_text, or an empty string."},
+        "selector": {"type": "string", "description": "CSS selector for click/fill/get_text/get_links (get_links defaults to 'a' — every link — if left empty), or an empty string."},
         "text": {"type": "string", "description": "Text to type for the fill action, or an empty string."},
     },
     "required": ["action", "url", "selector", "text"],
@@ -75,8 +79,25 @@ class BrowserTool:
         try:
             if action == "navigate":
                 target = self._safe_url(url)
-                page.goto(target, wait_until="domcontentloaded", timeout=30000)
-                return f"Navigated to {target}. Title: {page.title()}"
+                # "domcontentloaded" fires before JS-heavy single-page sites
+                # (e.g. YouTube) have actually rendered anything — an
+                # immediate get_text right after navigate would see an empty
+                # page. "load" plus a short fixed settle time is a pragmatic
+                # middle ground: "networkidle" would be more thorough but
+                # some sites (YouTube included) never truly go network-idle
+                # due to persistent analytics/ad connections, and would just
+                # time out instead of helping.
+                page.goto(target, wait_until="load", timeout=30000)
+                page.wait_for_timeout(1500)
+                title = page.title()
+                if not title and not page.inner_text("body", timeout=2000).strip():
+                    # Still nothing after settling — say so explicitly rather
+                    # than silently returning as if navigation fully
+                    # succeeded, since an agent handed an empty result here
+                    # has been observed filling the gap with plausible-looking
+                    # facts from its own training data instead of retrying.
+                    return f"Navigated to {target}, but the page appears empty so far (no title, no text). Call get_text again before trusting any content from this page — do not answer from general knowledge."
+                return f"Navigated to {target}. Title: {title}"
             if action == "click":
                 page.click(self._safe_selector(selector), timeout=4000)
                 return f"Clicked: {selector}"
@@ -91,6 +112,17 @@ class BrowserTool:
                 content = page.inner_text(selector or "body", timeout=4000)
                 collapsed = " ".join(content.split())
                 return collapsed[:3000] + ("...[truncated]" if len(collapsed) > 3000 else "")
+            if action == "get_links":
+                # get_text can only ever return visible text, never an
+                # attribute like href — this is the only way to get a link's
+                # actual destination URL rather than just its label.
+                links = page.eval_on_selector_all(
+                    selector or "a",
+                    "els => els.slice(0, 20).map(el => ({text: (el.innerText || '').trim().slice(0, 100), href: el.href}))",
+                )
+                if not links:
+                    return f"No links matched selector '{selector or 'a'}'."
+                return "\n".join(f"{i + 1}. {link['text'] or '(no text)'} -> {link['href']}" for i, link in enumerate(links))
             raise ValueError(f"Unknown browser action: {action}")
         except PlaywrightTimeoutError as exc:
             raise BrowserUnavailable(f"No element matched selector '{selector}' for '{action}' within 4s — it's likely wrong or doesn't exist on this page. Try get_text on a broader selector (e.g. 'body' or a parent element) to see the page's actual structure.") from exc

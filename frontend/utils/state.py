@@ -17,6 +17,10 @@ DEFAULTS = {
     # starting a fresh one. Cleared on repo change or an explicit reset.
     "github_session_id": "",
     "github_session_repo": "",
+    # Generated once per browser session and reused for every task request so
+    # a completed Gmail OAuth connection (stored server-side, keyed by this
+    # id) stays associated with this browser across queries.
+    "gmail_session_id": "",
 }
 
 
