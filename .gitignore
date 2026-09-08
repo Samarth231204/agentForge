@@ -29,6 +29,7 @@ env/
 
 # Internal planning docs kept local only, not shipped with the repo
 AGENTFORGE_FULL_IMPLEMENTATION.md
+AGENTFORGE_FULL_IMPLEMENTATION_2.md
 currentStatus.md
 IMPLEMENTATION_PHASE_1.md
 IMPLEMENTATION_PHASE_2.md
