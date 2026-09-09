@@ -10,7 +10,7 @@ import litellm
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.config import Settings, get_settings
-from backend.llm_fallback import build_llm_candidates, is_rate_limited
+from backend.llm_fallback import build_llm_candidates, is_json_validation_failure, is_rate_limited
 
 IntentName = Literal["research", "draft_email", "send_email", "github", "booking", "unsupported"]
 
@@ -132,6 +132,16 @@ class IntentParser:
                         messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_text if attempt == 0 else user_text + "\\nYour previous answer was invalid. Return valid JSON only."}],
                     )
                 except Exception as exc:
+                    if is_json_validation_failure(exc):
+                        # Groq rejected its own generation against the JSON
+                        # schema before returning any content — same
+                        # "invalid structured output" problem the retry
+                        # below already handles for a malformed-but-present
+                        # reply, just surfaced as an exception instead
+                        # (found live via pipeline_planner.py's more
+                        # complex schema; intent_parser.py shares this
+                        # exact retry loop and the same vulnerability).
+                        continue
                     if not is_rate_limited(exc):
                         raise
                     provider_failed = True

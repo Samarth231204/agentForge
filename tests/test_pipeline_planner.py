@@ -65,6 +65,32 @@ def test_plan_pipeline_rejects_a_step_that_depends_on_an_unknown_step(monkeypatc
     assert plan is None
 
 
+def test_plan_pipeline_retries_after_groqs_own_json_schema_rejection(monkeypatch):
+    """Real bug found live: Groq's response_format={"type": "json_object"}
+    validation can reject a generation outright and raise a BadRequestError
+    (code json_validate_failed) instead of returning malformed content —
+    this must be retried like any other malformed-JSON reply, not
+    propagate as an unhandled exception."""
+    import litellm
+
+    attempts = {"count": 0}
+
+    def flaky(*, model, **_kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            body = (
+                'GroqException - {"error":{"message":"Failed to validate JSON.","type":"invalid_request_error",'
+                '"code":"json_validate_failed","failed_generation":""}}'
+            )
+            raise litellm.BadRequestError(message=body, model=model, llm_provider="groq")
+        return _fake_response(_valid_plan_json())
+
+    monkeypatch.setattr("backend.llm_fallback.litellm.completion", flaky)
+    plan = plan_pipeline("...", _INTENTS, _SETTINGS)
+    assert plan is not None
+    assert attempts["count"] == 2
+
+
 def test_plan_pipeline_returns_none_when_every_candidate_fails_to_produce_valid_json(monkeypatch):
     monkeypatch.setattr("backend.llm_fallback.litellm.completion", lambda **_kwargs: SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))]))
     plan = plan_pipeline("...", _INTENTS, _SETTINGS)

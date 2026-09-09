@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import litellm
 import pytest
 
-from backend.llm_fallback import build_llm_candidates, complete_with_fallback
+from backend.llm_fallback import build_llm_candidates, complete_with_fallback, is_json_validation_failure
 
 
 def _fake_response(content="ok"):
@@ -22,6 +22,27 @@ def _corrupted_error(failed_generation: str | None = '{"name": "browser<|channel
 
 def _rate_limit_error(model: str) -> litellm.RateLimitError:
     return litellm.RateLimitError(message=f"Rate limit reached for model `{model}`: rate_limit_exceeded", model=model, llm_provider="groq")
+
+
+def _json_validation_error() -> litellm.BadRequestError:
+    # Reproduces the real error live-observed from pipeline_planner.py:
+    # Groq rejects its own generation against the requested JSON schema
+    # and raises this instead of returning malformed content.
+    body = (
+        'GroqException - {"error":{"message":"Failed to validate JSON. Please adjust your prompt. '
+        'See \'failed_generation\' for more details.","type":"invalid_request_error",'
+        '"code":"json_validate_failed","failed_generation":""}}'
+    )
+    return litellm.BadRequestError(message=body, model="groq/openai/gpt-oss-120b", llm_provider="groq")
+
+
+def test_is_json_validation_failure_recognizes_groqs_real_error_shape():
+    assert is_json_validation_failure(_json_validation_error()) is True
+
+
+def test_is_json_validation_failure_is_false_for_unrelated_errors():
+    assert is_json_validation_failure(_rate_limit_error("x")) is False
+    assert is_json_validation_failure(ValueError("something else entirely")) is False
 
 
 # --- build_llm_candidates -------------------------------------------------

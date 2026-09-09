@@ -180,18 +180,24 @@ def _compound_intents():
     ]
 
 
-def test_a_compound_request_with_a_valid_plan_runs_the_pipeline_executor(monkeypatch):
-    """Phase 11: a compound request that the planner can turn into a valid
-    plan actually executes it, rather than reporting "not available yet"."""
+def test_a_compound_request_with_a_valid_plan_proposes_it_without_executing(monkeypatch):
+    """Phase 12's review gate: a compound request that the planner can turn
+    into a valid plan gets PROPOSED, not run — nothing with real side
+    effects (a sent email, a pushed commit, a browser action) executes
+    until the user explicitly approves this exact plan via approved_plan."""
     import backend.main as main
     from backend.pipeline_planner import PipelinePlan, PipelineStep
 
     monkeypatch.setattr(main.IntentParser, "parse_intents", lambda _self, _p, _c, _r=False, _g=False: _compound_intents())
     fake_plan = PipelinePlan(steps=[PipelineStep(name="only_step", blueprint="single_agent_loop", intent="research", instructions="do it")], summary="test plan")
     monkeypatch.setattr(main, "plan_pipeline", lambda *_a, **_k: fake_plan)
-    monkeypatch.setattr(main, "execute_pipeline", lambda *_a, **_k: "the pipeline ran and produced this")
 
-    emitter = EventEmitter("test-compound-executed")
+    def exploding_execute(*_a, **_k):
+        raise AssertionError("execute_pipeline must not run without an approved_plan")
+
+    monkeypatch.setattr(main, "execute_pipeline", exploding_execute)
+
+    emitter = EventEmitter("test-compound-proposed")
     main._run_task("Find AI job postings and email each company's talent team", "", "", "", "", "", "", emitter)
 
     events = []
@@ -206,12 +212,65 @@ def test_a_compound_request_with_a_valid_plan_runs_the_pipeline_executor(monkeyp
     assert intent_event["data"]["all_intents"] == ["research", "send_email"]
 
     workflow_event = next(e for e in events if e["type"] == "workflow_started")
+    assert workflow_event["data"]["workflow"] == "dynamic_pipeline_proposed"
+    assert workflow_event["data"]["agents"] == ["only_step"]
+
+    result_event = next(e for e in events if e["type"] == "result")
+    assert result_event["data"]["intent"] == "pipeline_proposed"
+    assert result_event["data"]["plan"]["summary"] == "test plan"
+    assert events[-1] == {**events[-1], "type": "task_completed", "data": {"status": "completed"}}
+
+
+def test_an_approved_plan_actually_executes_via_the_pipeline_executor(monkeypatch):
+    """The only path that actually runs a multi-step plan: approved_plan
+    set on the request, matching what the frontend sends after the user
+    clicks Generate on a reviewed plan."""
+    import backend.main as main
+    from backend.pipeline_planner import PipelinePlan, PipelineStep
+
+    plan = PipelinePlan(steps=[PipelineStep(name="only_step", blueprint="single_agent_loop", intent="research", instructions="do it")], summary="approved plan")
+
+    def exploding_plan_pipeline(*_a, **_k):
+        raise AssertionError("plan_pipeline must not be called when approved_plan is already provided")
+
+    monkeypatch.setattr(main, "plan_pipeline", exploding_plan_pipeline)
+    monkeypatch.setattr(main, "execute_pipeline", lambda *_a, **_k: "the pipeline actually ran")
+
+    emitter = EventEmitter("test-compound-approved")
+    main._run_task("Find AI job postings and email each company's talent team", "", "", "", "", "", "", emitter, approved_plan=plan.model_dump())
+
+    events = []
+    while True:
+        event = emitter.queue.get()
+        if event is None:
+            break
+        events.append(event.model_dump(mode="json"))
+
+    workflow_event = next(e for e in events if e["type"] == "workflow_started")
     assert workflow_event["data"]["workflow"] == "dynamic_pipeline"
     assert workflow_event["data"]["agents"] == ["only_step"]
 
     result_event = next(e for e in events if e["type"] == "result")
-    assert result_event["data"]["content"] == "the pipeline ran and produced this"
+    assert result_event["data"]["content"] == "the pipeline actually ran"
     assert events[-1] == {**events[-1], "type": "task_completed", "data": {"status": "completed"}}
+
+
+def test_an_invalid_approved_plan_fails_cleanly_instead_of_crashing():
+    import backend.main as main
+
+    emitter = EventEmitter("test-invalid-approved-plan")
+    main._run_task("some prompt", "", "", "", "", "", "", emitter, approved_plan={"not": "a valid plan shape"})
+
+    events = []
+    while True:
+        event = emitter.queue.get()
+        if event is None:
+            break
+        events.append(event.model_dump(mode="json"))
+
+    assert events[0]["type"] == "error"
+    assert events[0]["data"]["code"] == "invalid_plan"
+    assert events[-1] == {**events[-1], "type": "task_completed", "data": {"status": "failed"}}
 
 
 def test_a_compound_request_the_planner_cannot_plan_reports_a_clear_message(monkeypatch):
@@ -239,6 +298,124 @@ def test_a_compound_request_the_planner_cannot_plan_reports_a_clear_message(monk
     assert "could not build a reliable plan" in result_event["data"]["content"]
 
     assert events[-1] == {**events[-1], "type": "task_completed", "data": {"status": "completed"}}
+
+
+def test_tasks_endpoint_actually_forwards_approved_plan_to_run_task(monkeypatch):
+    """Regression: an earlier edit updated /tasks/stream's call site to
+    forward approved_plan but missed the plain /tasks (JSON) endpoint —
+    the one curl and the real Streamlit frontend actually use — so
+    approved_plan was silently dropped and every "approved" plan request
+    ran the ordinary single-intent path instead of executing the plan.
+    Only caught by testing the real HTTP route, not by calling
+    main._run_task() directly (which is what the other approved_plan test
+    does and why this specific gap slipped through)."""
+    from fastapi.testclient import TestClient
+
+    import backend.main as main
+    from backend.pipeline_planner import PipelinePlan, PipelineStep
+
+    monkeypatch.setenv("GROQ_API_KEY_1", "test-key")
+
+    def exploding_parse_intents(*_a, **_k):
+        raise AssertionError("intent classification must not run when approved_plan is provided")
+
+    monkeypatch.setattr(main.IntentParser, "parse_intents", exploding_parse_intents)
+    monkeypatch.setattr(main, "execute_pipeline", lambda *_a, **_k: "executed via the real HTTP route")
+
+    plan = PipelinePlan(steps=[PipelineStep(name="only_step", blueprint="single_agent_loop", intent="research", instructions="do it")], summary="approved plan")
+
+    with TestClient(main.app) as client:
+        response = client.post("/tasks", json={"prompt": "find companies and email them", "approved_plan": plan.model_dump()})
+
+    assert response.status_code == 200
+    events = response.json()["events"]
+    result_event = next(e for e in events if e["type"] == "result")
+    assert result_event["data"]["content"] == "executed via the real HTTP route"
+
+
+def test_pipeline_plan_endpoint_reports_a_single_ordinary_intent_as_not_compound(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import backend.main as main
+
+    monkeypatch.setenv("GROQ_API_KEY_1", "test-key")
+    monkeypatch.setattr(main.IntentParser, "parse_intents", lambda _self, _p, _c, _r=False, _g=False: [Intent(intent="research", confidence=0.9, reason="ok", task_summary="x")])
+
+    with TestClient(main.app) as client:
+        response = client.post("/pipeline/plan", json={"prompt": "what is the capital of France"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"compound": False, "intent": "research", "plan": None}
+
+
+def test_pipeline_plan_endpoint_returns_a_plan_for_a_compound_request(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import backend.main as main
+    from backend.pipeline_planner import PipelinePlan, PipelineStep
+
+    monkeypatch.setenv("GROQ_API_KEY_1", "test-key")
+    monkeypatch.setattr(main.IntentParser, "parse_intents", lambda _self, _p, _c, _r=False, _g=False: _compound_intents())
+    fake_plan = PipelinePlan(steps=[PipelineStep(name="only_step", blueprint="single_agent_loop", intent="research", instructions="do it")], summary="test plan")
+    monkeypatch.setattr(main, "plan_pipeline", lambda *_a, **_k: fake_plan)
+
+    with TestClient(main.app) as client:
+        response = client.post("/pipeline/plan", json={"prompt": "find companies and email them"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["compound"] is True
+    assert body["plan"]["summary"] == "test plan"
+    assert body["plan"]["steps"][0]["name"] == "only_step"
+
+
+def test_pipeline_plan_endpoint_reports_none_when_the_planner_fails(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import backend.main as main
+
+    monkeypatch.setenv("GROQ_API_KEY_1", "test-key")
+    monkeypatch.setattr(main.IntentParser, "parse_intents", lambda _self, _p, _c, _r=False, _g=False: _compound_intents())
+    monkeypatch.setattr(main, "plan_pipeline", lambda *_a, **_k: None)
+
+    with TestClient(main.app) as client:
+        response = client.post("/pipeline/plan", json={"prompt": "find companies and email them"})
+
+    assert response.status_code == 200
+    assert response.json() == {"compound": True, "intent": None, "plan": None}
+
+
+def test_pipeline_plan_endpoint_includes_the_revision_instruction_when_revising(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import backend.main as main
+    from backend.pipeline_planner import PipelinePlan, PipelineStep
+
+    monkeypatch.setenv("GROQ_API_KEY_1", "test-key")
+    monkeypatch.setattr(main.IntentParser, "parse_intents", lambda _self, _p, _c, _r=False, _g=False: _compound_intents())
+    captured_prompts = []
+
+    def capturing_plan_pipeline(prompt, intents, settings):
+        captured_prompts.append(prompt)
+        return PipelinePlan(steps=[PipelineStep(name="s", blueprint="single_agent_loop", intent="research", instructions="x")], summary="revised plan")
+
+    monkeypatch.setattr(main, "plan_pipeline", capturing_plan_pipeline)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/pipeline/plan",
+            json={
+                "prompt": "find companies and email them",
+                "revision_instruction": "only check 3 companies instead of 5",
+                "prior_plan": {"summary": "original plan"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["plan"]["summary"] == "revised plan"
+    assert "only check 3 companies instead of 5" in captured_prompts[0]
+    assert "original plan" in captured_prompts[0]
 
 
 def test_rate_limited_task_has_a_clear_retryable_event(monkeypatch):

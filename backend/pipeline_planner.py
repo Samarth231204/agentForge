@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.blueprints import DEFAULT_FANOUT_CAP, BlueprintName
 from backend.intent_parser import Intent, IntentName
-from backend.llm_fallback import build_llm_candidates, complete_with_fallback, is_rate_limited
+from backend.llm_fallback import build_llm_candidates, complete_with_fallback, is_json_validation_failure, is_rate_limited
 from backend.tool_registry import get_tool_registry
 
 if TYPE_CHECKING:
@@ -129,6 +129,14 @@ def plan_pipeline(prompt: str, intents: list[Intent], settings: "Settings") -> P
                     ],
                 )
             except Exception as exc:
+                if is_json_validation_failure(exc):
+                    # Groq rejected its own generation against the JSON
+                    # schema before returning any content at all — same
+                    # "invalid structured output" problem the retry below
+                    # already handles for a malformed-but-present reply,
+                    # just surfaced as an exception instead. Retry this
+                    # candidate exactly as if that had happened.
+                    continue
                 if not is_rate_limited(exc):
                     raise
                 provider_failed = True

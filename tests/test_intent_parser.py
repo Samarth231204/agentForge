@@ -170,3 +170,30 @@ def test_non_empty_string_constraints_are_coerced_to_a_single_item_list():
     client = FakeClient([json.dumps({"intents": [{"intent": "research", "confidence": 0.9, "reason": "ok", "task_summary": "x", "constraints": "must be recent"}]})])
     result = IntentParser(client=client).parse("Find something")
     assert result.constraints == ["must be recent"]
+
+
+def test_retries_after_groqs_own_json_schema_rejection():
+    """Same real bug found via pipeline_planner.py, verified here too since
+    intent_parser.py shares the identical retry-loop shape and the same
+    vulnerability: a raised json_validate_failed BadRequestError must be
+    retried, not propagate as an unhandled exception."""
+    import litellm
+
+    class FlakyThenValidClient:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                body = (
+                    'GroqException - {"error":{"message":"Failed to validate JSON.","type":"invalid_request_error",'
+                    '"code":"json_validate_failed","failed_generation":""}}'
+                )
+                raise litellm.BadRequestError(message=body, model="groq/x", llm_provider="groq")
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"intents": [{"intent": "research", "confidence": 0.9, "reason": "ok", "task_summary": "x", "constraints": []}]})))])
+
+    client = FlakyThenValidClient()
+    result = IntentParser(client=client).parse("Do something unclear")
+    assert result.intent == "research"
+    assert client.calls == 2

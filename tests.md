@@ -218,3 +218,34 @@ Prerequisites for any of the checks below: `.venv312` set up with `requirements.
 3. While it's running, you can confirm genuine concurrency yourself: `ps aux | grep chromium | grep -v grep | wc -l` should show multiple Chromium processes at once during a `parallel_fanout` step, not just one.
 4. This flows through the same `/tasks` response shape (`intent`/`content`/`sources`) every other workflow already uses, so it renders correctly in the real Streamlit frontend today with zero frontend changes — try the same prompt through the actual UI.
 
+---
+
+## Phase 12 — Frontend plan-review UX (final phase)
+
+**What changed:** a compound request now gets **proposed**, not auto-run — the frontend shows the plan (every step, its blueprint, tools, dependencies, fan-out count) before anything executes. You can ask for changes (Revise), approve it (Generate), or cancel (Discard). Two real bugs were found and fixed while wiring this up: the planner could 500 on Groq's own JSON-schema rejection, and the actual `/tasks` endpoint was silently dropping the approved plan (a real correctness bug, not caught until testing the real HTTP route).
+
+**Validate it yourself:**
+
+1. Run the automated tests, including the two new regression tests:
+   ```
+   .venv312/bin/python -m pytest tests/test_task_api.py tests/test_llm_fallback.py tests/test_pipeline_planner.py tests/test_intent_parser.py -v
+   ```
+2. Start the backend, then confirm `/pipeline/plan` works for both an ordinary and a compound request:
+   ```
+   curl -s -X POST http://localhost:8000/pipeline/plan -H "Content-Type: application/json" \
+     -d '{"prompt": "what is the capital of France"}' | python3 -m json.tool
+   # -> {"compound": false, ...}
+
+   curl -s -X POST http://localhost:8000/pipeline/plan -H "Content-Type: application/json" \
+     -d '{"prompt": "find the top 3 most popular programming languages, then check each ones official website for its current stable release version"}' | python3 -m json.tool
+   # -> {"compound": true, "plan": {...}} — try a few times if you get compound:false, classification varies
+   ```
+3. **The real test — through the actual frontend UI, click by click:**
+   - Start both backend and frontend (`.venv312/bin/streamlit run frontend/app.py --server.port 8501`).
+   - Submit the compound prompt from step 2 above.
+   - You should see a **"Proposed plan"** section appear — summary, each step expanded showing its blueprint/tools/instructions — and explicitly **nothing running yet** (no agent graph activity, no result).
+   - Type something in "Ask for a change to this plan" (e.g. "only check 2 languages instead of 3") and click **Revise plan** — the plan shown should update to reflect your request.
+   - Click **Generate** — now it actually runs: the normal agent graph/event log/result panel should activate exactly as any other task does, and the final result should show real output from each step.
+   - Try **Discard** on a different compound prompt instead — confirm it clears the plan and returns you to the normal input screen without anything having run.
+4. Confirm the safety guarantee directly: with `MEM0_API_KEY`/Gmail not needed for this check, just confirm that **no `agent_started` event ever appears before you click Generate** — the plan-review screen must never have started executing anything in the background while you were still reviewing it.
+

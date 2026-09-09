@@ -25,6 +25,15 @@ DEFAULTS = {
     # gmail_session_id — used only as a lookup key for this session's task
     # history stored server-side (backend/history_store.py).
     "history_session_id": "",
+    # Phase 12: a proposed multi-step PipelinePlan awaiting the user's
+    # review (revise or approve) before anything actually runs. None means
+    # there is nothing pending. pending_plan_prompt/context are the exact
+    # request the plan was proposed for, kept alongside the plan so
+    # "Generate" runs precisely what was reviewed, not whatever happens to
+    # be in the prompt box at the moment the button is clicked.
+    "pending_plan": None,
+    "pending_plan_prompt": "",
+    "pending_plan_context": "",
 }
 
 

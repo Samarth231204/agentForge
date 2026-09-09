@@ -78,6 +78,24 @@ def is_rate_limited(exc: Exception) -> bool:
     return exc.__class__.__name__ == "RateLimitError" or any(marker in text for marker in _RATE_LIMIT_MARKERS)
 
 
+def is_json_validation_failure(exc: Exception) -> bool:
+    """Recognize Groq's own server-side JSON-schema rejection for a
+    response_format={"type": "json_object"} request — raised as a
+    BadRequestError ("Failed to validate JSON... json_validate_failed")
+    *instead of* returning malformed content. This is the same underlying
+    problem intent_parser.py's/pipeline_planner.py's malformed-JSON retry
+    already handles (the model failed to produce a valid structured
+    response) — but that retry only triggers on a successful response
+    whose content fails json.loads()/Pydantic validation; it never sees
+    this case, since here there's no content at all, only a raised
+    exception. Found live: a pipeline_planner.py request (a more complex
+    nested schema than intent_parser.py's) tripped this and propagated as
+    an unhandled 500, uncaught by either the malformed-JSON retry or
+    is_rate_limited(). Callers should retry the same candidate on this,
+    exactly as they already do for a malformed (but present) JSON reply."""
+    return "json_validate_failed" in str(exc).lower()
+
+
 def build_llm_candidates(settings: "Settings") -> list[tuple[str, str]]:
     """The primary configured Groq model first, then the fixed Groq fallback
     chain, then every configured OpenRouter model last, in order, if (and
