@@ -19,6 +19,23 @@ class GmailUnavailable(RuntimeError):
     """Raised when Gmail isn't connected for this session, or the send itself fails."""
 
 
+NAME = "email"
+DESCRIPTION = (
+    "Send an email via the connected Gmail account. Requires a Gmail account already connected "
+    "for this session — never available otherwise. Sends immediately and for real; there is no "
+    "draft-only mode for this tool. Provide the recipient address, subject line, and full body text."
+)
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "to": {"type": "string", "description": "Recipient email address."},
+        "subject": {"type": "string", "description": "Email subject line."},
+        "body": {"type": "string", "description": "Full email body text."},
+    },
+    "required": ["to", "subject", "body"],
+}
+
+
 def send_email(*, session_id: str, to: str, subject: str, body: str, token_store: TokenStore) -> str:
     stored = token_store.get(session_id)
     if not stored:

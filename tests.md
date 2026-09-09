@@ -65,3 +65,26 @@ Prerequisites for any of the checks below: `.venv312` set up with `requirements.
    Look for an `intent_detected` event with `"compound": true` and `"all_intents": ["research", "send_email"]` (or similar), and a `result` event explaining that multi-step pipelines aren't runnable yet. Note: a prompt containing exact phrases like "send an email" will instead hit the fast keyword-based single-intent path (by design) and never reach this compound-detection logic — phrase it more indirectly (as above) to actually exercise the LLM classifier.
 4. This flows through the existing `/tasks` endpoint and event shape unchanged, so it's already visible in the real Streamlit frontend today — submit either prompt above through the actual UI and confirm the result panel renders correctly either way.
 
+---
+
+## Phase 7 — Tool registry
+
+**What changed:** `backend/tool_registry.py` now describes all 4 existing tools (browser, web_search, github, email) — name, description, JSON schema — in one place, for the Phase 10 planner to read later. No existing behavior changed anywhere; nothing calls this registry yet outside its own tests.
+
+**Validate it yourself:**
+
+1. Run the automated tests:
+   ```
+   .venv312/bin/python -m pytest tests/test_tool_registry.py -v
+   ```
+2. Inspect the real registry directly (no HTTP endpoint exists for this yet, so this is the equivalent of a "real-service" check for this phase):
+   ```
+   .venv312/bin/python -c "
+   from backend.tool_registry import get_tool_registry
+   for tool in get_tool_registry():
+       print(tool.name, '->', list(tool.schema['properties'].keys()))
+   "
+   ```
+   Should print all 4 tools with their real parameter names.
+3. Nothing to check on the frontend for this phase — it's a pure backend building block with no wired endpoint yet.
+

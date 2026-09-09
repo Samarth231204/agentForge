@@ -15,6 +15,36 @@ class SandboxUnavailable(RuntimeError):
     """Raised when Docker is unavailable or a sandbox operation cannot run."""
 
 
+NAME = "github"
+DESCRIPTION = (
+    "Operate a GitHub repository inside an isolated, credential-scoped Docker sandbox. Actions: "
+    "clone (start work on a branch), list_files, read_file, write_file, run_command (tests/lint), "
+    "push_branch, create_pull_request. Requires a repository URL and a fine-grained token already "
+    "configured for this session — never available otherwise. EVERY call must include action, "
+    "file_path, content, command, branch_name, title, and body; set every field not needed by that "
+    "action to an empty string."
+)
+# Every field required rather than optional, matching browser_tool.py's SCHEMA — Groq's tool-call
+# validator rejects a call missing any schema-declared property, even one marked optional.
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["clone", "list_files", "read_file", "write_file", "run_command", "push_branch", "create_pull_request"],
+            "description": "The repository operation to perform.",
+        },
+        "file_path": {"type": "string", "description": "Path for read_file/write_file, or an empty string."},
+        "content": {"type": "string", "description": "File content for write_file, or an empty string."},
+        "command": {"type": "string", "description": "Shell command for run_command, or an empty string."},
+        "branch_name": {"type": "string", "description": "Branch name for clone/push_branch/create_pull_request, or an empty string."},
+        "title": {"type": "string", "description": "Pull request title for create_pull_request, or an empty string."},
+        "body": {"type": "string", "description": "Pull request body for create_pull_request, or an empty string."},
+    },
+    "required": ["action", "file_path", "content", "command", "branch_name", "title", "body"],
+}
+
+
 class GithubTool:
     """Operate a single session's repository without exposing its PAT to the agent."""
 
