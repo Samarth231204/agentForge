@@ -159,3 +159,34 @@ Prerequisites for any of the checks below: `.venv312` set up with `requirements.
    ```
 4. Nothing to check on the frontend for this phase either — same reason as Phase 7/8.
 
+---
+
+## Phase 10 — Pipeline planner
+
+**What changed:** `backend/pipeline_planner.py` turns a compound request's detected intents into a concrete, validated `PipelinePlan` (steps, blueprint per step, tools, dependencies, fan-out count) — the "brain" of the pipeline system. Nothing calls it from `main.py` yet (that's Phase 11); this is planner-only.
+
+**Validate it yourself:**
+
+1. Run the automated tests:
+   ```
+   .venv312/bin/python -m pytest tests/test_pipeline_planner.py -v
+   ```
+2. See a real plan generated for the exact motivating example from this roadmap:
+   ```
+   .venv312/bin/python -c "
+   from backend.config import get_settings
+   from backend.intent_parser import IntentParser
+   from backend.pipeline_planner import plan_pipeline
+
+   settings = get_settings()
+   prompt = 'find the top 3 AI companies hiring right now, then visit each of their individual career pages on their own website to find their talent acquisition team email, then send each one a personalized email'
+   intents = IntentParser().parse_intents(prompt, has_gmail_context=True)
+   plan = plan_pipeline(prompt, intents, settings)
+   print('summary:', plan.summary)
+   for step in plan.steps:
+       print(f'- [{step.name}] blueprint={step.blueprint} tools={step.tools} fanout={step.fanout_count} depends_on={step.depends_on}')
+   "
+   ```
+   Should print a multi-step plan, likely including at least one `parallel_fanout` step capped at `fanout=3` (matching "top 3"), with `depends_on` chaining steps in a sensible order. Try a few different phrasings — the plan's exact shape (single-agent vs. fan-out) legitimately varies with how explicit the request is about needing individual site visits.
+3. Nothing to check on the frontend for this phase either — same reason as Phase 7/8/9.
+
