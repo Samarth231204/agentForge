@@ -88,3 +88,39 @@ Prerequisites for any of the checks below: `.venv312` set up with `requirements.
    Should print all 4 tools with their real parameter names.
 3. Nothing to check on the frontend for this phase — it's a pure backend building block with no wired endpoint yet.
 
+---
+
+## Phase 8 — Blueprint taxonomy
+
+**What changed:** `backend/blueprints.py` adds 3 reusable execution patterns (`single_agent_loop`, `sequential_stages`, `parallel_fanout`) for the Phase 10 planner to choose from — all thin wrappers around already-tested machinery (`agent_loop.py`, `llm_fallback.py`). Nothing existing changed; nothing calls these yet outside their own tests.
+
+**Validate it yourself:**
+
+1. Run the automated tests, including the real wall-clock concurrency proof:
+   ```
+   .venv312/bin/python -m pytest tests/test_blueprints.py -v
+   ```
+2. See all three blueprints work against the real LLM, including genuine concurrent overlap:
+   ```
+   .venv312/bin/python -c "
+   import time
+   from backend.config import get_settings
+   from backend.blueprints import run_single_agent_loop, run_sequential_stages, Stage, run_parallel_fanout
+
+   settings = get_settings()
+   print(run_single_agent_loop('You are helpful.', 'Reply with one word: hello', tools=[], settings=settings))
+
+   stages = [
+       Stage('Brainstorm', 'Suggest one tagline for a coffee shop, just the tagline.', lambda p, prior: p),
+       Stage('Polish', 'Polish this tagline to be punchier, just the final tagline.', lambda p, prior: prior[0]),
+   ]
+   print(run_sequential_stages(stages, 'A cozy neighborhood coffee shop', settings))
+
+   start = time.monotonic()
+   results = run_parallel_fanout('Reply with one word.', ['sky color?', 'grass color?', 'banana color?'], lambda i: i, lambda: [], settings)
+   print(results, f'{time.monotonic()-start:.2f}s for 3 concurrent calls')
+   "
+   ```
+   The fan-out timing should be noticeably less than 3x a single call's latency — that's the proof it's genuinely concurrent, not sequential.
+3. Nothing to check on the frontend for this phase either — same reason as Phase 7.
+
