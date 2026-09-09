@@ -34,7 +34,7 @@ def test_truncated_plan_reports_the_actual_cause_instead_of_raw_json(monkeypatch
 
     monkeypatch.setattr("backend.llm_fallback.litellm.completion", fake_completion)
     github = FakeGithub()
-    settings = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_model="")
+    settings = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_models=())
 
     result = github_crew._run_workflow("write a big summary", github, "agentforge/test1234", settings)
 
@@ -65,7 +65,7 @@ def test_gitignored_file_produces_a_specific_actionable_message(monkeypatch):
             return super()._run(action, **kwargs)
 
     github = GitignoreGithub()
-    settings = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_model="")
+    settings = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_models=())
 
     result = github_crew._run_workflow("write a summary", github, "agentforge/test1234", settings)
 
@@ -80,7 +80,7 @@ def test_genuinely_malformed_plan_still_shows_the_raw_response(monkeypatch):
 
     monkeypatch.setattr("backend.llm_fallback.litellm.completion", fake_completion)
     github = FakeGithub()
-    settings = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_model="")
+    settings = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_models=())
 
     result = github_crew._run_workflow("do something", github, "agentforge/test1234", settings)
 

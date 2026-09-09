@@ -28,7 +28,7 @@ def test_email_workflow_chains_planner_writer_reviewer_sequentially(monkeypatch)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
 
     monkeypatch.setattr("backend.llm_fallback.litellm.completion", fake_completion)
-    settings = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_model="")
+    settings = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_models=())
 
     result = email_crew.run_email_workflow("Write an email", "", settings)
 

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from backend.critic_agent import run_critic
 
-_SETTINGS = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_model="")
+_SETTINGS = SimpleNamespace(groq_api_key="not-a-real-key", groq_model="openai/gpt-oss-120b", openrouter_api_key="", openrouter_models=())
 
 
 def _fake_completion(content):

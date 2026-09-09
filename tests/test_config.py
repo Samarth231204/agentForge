@@ -49,3 +49,25 @@ def test_missing_active_keys_env_var_raises_a_clear_error(monkeypatch):
     with pytest.raises(ConfigurationError, match="GROQ_API_KEY_2"):
         get_settings()
     get_settings.cache_clear()
+
+
+def test_openrouter_models_defaults_to_an_empty_tuple_when_unset(monkeypatch):
+    get_settings.cache_clear()
+    _isolate(monkeypatch)
+    monkeypatch.setenv("GROQ_API_KEY_1", "key-one")
+    monkeypatch.delenv("OPENROUTER_MODELS", raising=False)
+    assert get_settings().openrouter_models == ()
+    get_settings.cache_clear()
+
+
+def test_openrouter_models_parses_a_comma_separated_list(monkeypatch):
+    get_settings.cache_clear()
+    _isolate(monkeypatch)
+    monkeypatch.setenv("GROQ_API_KEY_1", "key-one")
+    monkeypatch.setenv("OPENROUTER_MODELS", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free, cohere/north-mini-code:free ,inclusionai/ling-3.0-flash-fin:free")
+    assert get_settings().openrouter_models == (
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "cohere/north-mini-code:free",
+        "inclusionai/ling-3.0-flash-fin:free",
+    )
+    get_settings.cache_clear()

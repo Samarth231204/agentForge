@@ -24,11 +24,15 @@ class Settings:
     # *same* key often has an entirely untouched quota — that's what the
     # fallback chain in llm_fallback.py exploits automatically.
     groq_model: str = "openai/gpt-oss-20b"
-    # Optional final fallback after every Groq candidate is exhausted. Only
-    # used once both are non-empty — leave blank until you have an
-    # OpenRouter account; no code changes needed to start using it later.
+    # Optional final fallback chain, tried in order after every Groq
+    # candidate is exhausted. Only used once both are non-empty — leave
+    # blank until you have an OpenRouter account; no code changes needed to
+    # start using it later. Comma-separated so more than one free model can
+    # back each other up — OpenRouter's free tier is itself rate-limited and
+    # models occasionally get discontinued outright (see llm_fallback.py),
+    # so a single hardcoded model silently rots.
     openrouter_api_key: str = ""
-    openrouter_model: str = ""
+    openrouter_models: tuple[str, ...] = ()
     gemini_api_key: str = ""
     # A floating alias rather than a pinned version: Google moves it forward
     # automatically, whereas pinned versions (gemini-2.0-flash, gemini-2.5-flash)
@@ -85,7 +89,7 @@ def get_settings() -> Settings:
         groq_api_key=groq_api_key,
         groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip(),
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
-        openrouter_model=os.getenv("OPENROUTER_MODEL", "").strip(),
+        openrouter_models=tuple(m.strip() for m in os.getenv("OPENROUTER_MODELS", "").split(",") if m.strip()),
         gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip(),
         backend_host=os.getenv("BACKEND_HOST", "0.0.0.0"),

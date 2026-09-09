@@ -54,7 +54,15 @@ _CORRUPTED_TOOL_CALL_MARKERS = (
     "tool_use_failed",
     "output_parse_failed",
 )
-_RATE_LIMIT_MARKERS = ("rate_limit_exceeded", "resource_exhausted", "429", "503", "unavailable")
+# "resourceexhausted" (no separator) and "limit reached" were added after a
+# real OpenRouter model (nvidia/nemotron-3-nano-omni via an upstream Google
+# proxy) returned "Upstream error from Nvidia: ResourceExhausted: Worker
+# local total request limit reached (16/16)" — a genuine rate limit that the
+# original Groq-shaped markers didn't recognize, so complete_with_fallback()
+# raised instead of advancing to the next candidate. Different providers
+# format the same condition differently; this list is deliberately loose
+# rather than assuming every provider matches Groq's exact wording.
+_RATE_LIMIT_MARKERS = ("rate_limit_exceeded", "resource_exhausted", "resourceexhausted", "limit reached", "429", "503", "unavailable")
 
 # Fixed Groq fallback chain, tried after whatever GROQ_MODEL is configured as
 # primary. Rate limits are per-model on Groq, so these give fresh quota pools
@@ -72,14 +80,19 @@ def is_rate_limited(exc: Exception) -> bool:
 
 def build_llm_candidates(settings: "Settings") -> list[tuple[str, str]]:
     """The primary configured Groq model first, then the fixed Groq fallback
-    chain, then OpenRouter last if (and only if) it's been configured —
-    added automatically the moment OPENROUTER_API_KEY is set, no code
-    changes needed. Order preserved, duplicates (e.g. the primary model
-    already being one of the fallbacks) collapsed."""
+    chain, then every configured OpenRouter model last, in order, if (and
+    only if) OPENROUTER_API_KEY is set — added automatically the moment it
+    is, no code changes needed. Multiple OpenRouter models matter here: its
+    free tier is itself rate-limited per model, and free models occasionally
+    get discontinued outright (confirmed directly — the model this project
+    originally shipped with, minimax/minimax-m3:free, stopped working
+    entirely), so a single hardcoded OpenRouter model is a fragile last
+    resort. Order preserved, duplicates (e.g. the primary model already
+    being one of the fallbacks) collapsed."""
     candidates = [(f"groq/{settings.groq_model}", settings.groq_api_key)]
     candidates += [(f"groq/{model}", settings.groq_api_key) for model in _GROQ_FALLBACK_MODELS]
-    if settings.openrouter_api_key and settings.openrouter_model:
-        candidates.append((f"openrouter/{settings.openrouter_model}", settings.openrouter_api_key))
+    if settings.openrouter_api_key:
+        candidates += [(f"openrouter/{model}", settings.openrouter_api_key) for model in settings.openrouter_models]
 
     seen: set[str] = set()
     deduped: list[tuple[str, str]] = []

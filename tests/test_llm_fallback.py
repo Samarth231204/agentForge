@@ -28,7 +28,7 @@ def _rate_limit_error(model: str) -> litellm.RateLimitError:
 
 
 def test_build_llm_candidates_orders_primary_then_groq_fallbacks():
-    settings = SimpleNamespace(groq_model="openai/gpt-oss-20b", groq_api_key="k", openrouter_api_key="", openrouter_model="")
+    settings = SimpleNamespace(groq_model="openai/gpt-oss-20b", groq_api_key="k", openrouter_api_key="", openrouter_models=())
     candidates = build_llm_candidates(settings)
     models = [model for model, _key in candidates]
     assert models == ["groq/openai/gpt-oss-20b", "groq/openai/gpt-oss-120b", "groq/qwen/qwen3.8-27b"]
@@ -36,21 +36,37 @@ def test_build_llm_candidates_orders_primary_then_groq_fallbacks():
 
 
 def test_build_llm_candidates_deduplicates_primary_if_already_a_fallback():
-    settings = SimpleNamespace(groq_model="openai/gpt-oss-120b", groq_api_key="k", openrouter_api_key="", openrouter_model="")
+    settings = SimpleNamespace(groq_model="openai/gpt-oss-120b", groq_api_key="k", openrouter_api_key="", openrouter_models=())
     models = [model for model, _key in build_llm_candidates(settings)]
     assert models == ["groq/openai/gpt-oss-120b", "groq/openai/gpt-oss-20b", "groq/qwen/qwen3.8-27b"]
 
 
-def test_build_llm_candidates_appends_openrouter_only_when_fully_configured():
-    without = SimpleNamespace(groq_model="openai/gpt-oss-20b", groq_api_key="k", openrouter_api_key="", openrouter_model="")
-    assert "openrouter" not in str(build_llm_candidates(without))
+def test_build_llm_candidates_appends_openrouter_only_when_api_key_is_set():
+    without_key = SimpleNamespace(groq_model="openai/gpt-oss-20b", groq_api_key="k", openrouter_api_key="", openrouter_models=("some/model",))
+    assert "openrouter" not in str(build_llm_candidates(without_key))
 
-    with_only_key = SimpleNamespace(groq_model="openai/gpt-oss-20b", groq_api_key="k", openrouter_api_key="or-key", openrouter_model="")
-    assert "openrouter" not in str(build_llm_candidates(with_only_key))
+    without_models = SimpleNamespace(groq_model="openai/gpt-oss-20b", groq_api_key="k", openrouter_api_key="or-key", openrouter_models=())
+    assert "openrouter" not in str(build_llm_candidates(without_models))
 
-    fully_configured = SimpleNamespace(groq_model="openai/gpt-oss-20b", groq_api_key="k", openrouter_api_key="or-key", openrouter_model="some/model")
+    fully_configured = SimpleNamespace(groq_model="openai/gpt-oss-20b", groq_api_key="k", openrouter_api_key="or-key", openrouter_models=("some/model",))
     candidates = build_llm_candidates(fully_configured)
     assert candidates[-1] == ("openrouter/some/model", "or-key")
+
+
+def test_build_llm_candidates_appends_every_configured_openrouter_model_in_order():
+    settings = SimpleNamespace(
+        groq_model="openai/gpt-oss-20b",
+        groq_api_key="k",
+        openrouter_api_key="or-key",
+        openrouter_models=("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "cohere/north-mini-code:free", "inclusionai/ling-3.0-flash-fin:free"),
+    )
+    candidates = build_llm_candidates(settings)
+    openrouter_candidates = [c for c in candidates if c[0].startswith("openrouter/")]
+    assert openrouter_candidates == [
+        ("openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "or-key"),
+        ("openrouter/cohere/north-mini-code:free", "or-key"),
+        ("openrouter/inclusionai/ling-3.0-flash-fin:free", "or-key"),
+    ]
 
 
 # --- complete_with_fallback: cross-candidate fallback ---------------------
@@ -91,6 +107,32 @@ def test_complete_with_fallback_does_not_advance_on_a_permanent_error(monkeypatc
     with pytest.raises(litellm.AuthenticationError):
         complete_with_fallback([("groq/model-a", "k1"), ("groq/model-b", "k2")], messages=[])
     assert calls == ["groq/model-a"]  # never tried model-b for a permanent error
+
+
+def test_complete_with_fallback_advances_past_an_openrouter_style_resource_exhausted_error(monkeypatch):
+    """Reproduces a real error hit live against nvidia/nemotron-3-nano-omni
+    via OpenRouter: 'Upstream error from Nvidia: ResourceExhausted: Worker
+    local total request limit reached (16/16)' — no underscore, not a
+    litellm.RateLimitError instance, and didn't match any prior marker, so
+    complete_with_fallback() raised instead of advancing to the next
+    candidate. is_rate_limited() must recognize this shape too."""
+    calls = []
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] == "openrouter/model-a":
+            raise litellm.APIError(
+                status_code=500,
+                message="OpenrouterException - Upstream error from Nvidia: ResourceExhausted: Worker local total request limit reached (16/16)",
+                model="openrouter/model-a",
+                llm_provider="openrouter",
+            )
+        return _fake_response(content="answered by model-b")
+
+    monkeypatch.setattr("backend.llm_fallback.litellm.completion", fake_completion)
+    result = complete_with_fallback([("openrouter/model-a", "k1"), ("openrouter/model-b", "k2")], messages=[])
+    assert result.choices[0].message.content == "answered by model-b"
+    assert calls == ["openrouter/model-a", "openrouter/model-b"]
 
 
 def test_complete_with_fallback_requires_at_least_one_candidate():
