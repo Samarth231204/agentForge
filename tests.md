@@ -124,3 +124,38 @@ Prerequisites for any of the checks below: `.venv312` set up with `requirements.
    The fan-out timing should be noticeably less than 3x a single call's latency — that's the proof it's genuinely concurrent, not sequential.
 3. Nothing to check on the frontend for this phase either — same reason as Phase 7.
 
+---
+
+## Phase 9 — Redis pipeline-state store
+
+**What changed:** `backend/pipeline_state.py` adds a Redis-backed store for one pipeline run's step-to-step handoff data — the mechanism Phase 11's executor will use to pass a step's output into the next step. No TTL (unlike Gmail tokens) — explicit `delete_run()` cleanup once a run finishes instead.
+
+**Validate it yourself:**
+
+1. Run the automated tests:
+   ```
+   .venv312/bin/python -m pytest tests/test_pipeline_state.py -v
+   ```
+2. With Redis running (`docker start agentforge-redis` if needed), confirm real persistence and cleanup:
+   ```
+   .venv312/bin/python -c "
+   from backend.config import get_settings
+   from backend.pipeline_state import get_pipeline_state_store
+
+   get_settings.cache_clear()
+   get_pipeline_state_store.cache_clear()
+   store = get_pipeline_state_store()
+   print('store type:', type(store).__name__)  # should say RedisPipelineStateStore
+
+   store.set_step_result('my-test-run', 'research', ['Company A', 'Company B'])
+   print('all results:', store.get_all_results('my-test-run'))
+   store.delete_run('my-test-run')
+   print('after delete:', store.get_all_results('my-test-run'))  # should be {}
+   "
+   ```
+3. Confirm directly in Redis (should show the hash before you run step 2's delete, empty/missing after):
+   ```
+   docker exec agentforge-redis redis-cli HGETALL "agentforge:pipeline_state:my-test-run"
+   ```
+4. Nothing to check on the frontend for this phase either — same reason as Phase 7/8.
+
