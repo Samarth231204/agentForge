@@ -25,6 +25,8 @@ from backend.event_emitter import EventEmitter
 from backend.history_store import get_history_store
 from backend.intent_parser import IntentParser
 from backend.memory_manager import get_memory_manager
+from backend.pipeline_executor import ExecutionContext, execute_pipeline
+from backend.pipeline_planner import plan_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -142,22 +144,27 @@ def _run_task(prompt: str, context: str, repo_url: str, github_token: str, sessi
             intent_event["all_intents"] = [i.intent for i in intents]
         emitter.emit("intent_detected", intent_event)
         if len(intents) > 1:
-            # Phase 6 (multi-intent classification) is ahead of the pipeline
-            # executor that would actually run a compound request (Phases
-            # 8/10/11) — detected correctly here, but nothing exists yet to
-            # act on more than one intent, so this reports that plainly
-            # rather than silently only running the first step.
-            steps = ", ".join(i.intent for i in intents)
-            result = {
-                "intent": "unsupported",
-                "content": (
-                    f"This request needs multiple different capabilities working together ({steps}). "
-                    "AgentForge detected that correctly, but running a multi-step pipeline like this "
-                    "isn't available yet — support for it is coming in a later phase. For now, try "
-                    "asking for one part of this at a time."
-                ),
-                "sources": [],
-            }
+            settings = get_settings()
+            plan = _call_with_retry(lambda: plan_pipeline(prompt, intents, settings), emitter, "pipeline planning")
+            if plan is not None:
+                emitter.emit("workflow_started", {"workflow": "dynamic_pipeline", "agents": [step.name for step in plan.steps]})
+                ctx = ExecutionContext(repo_url=repo_url, github_token=github_token, session_id=session_id, gmail_session_id=gmail_session_id)
+                content = execute_pipeline(plan, settings, ctx, emitter)
+                result = {"intent": "pipeline", "content": content, "sources": []}
+            else:
+                # The planner itself failed to produce a valid plan across
+                # every candidate model — fall back to plainly reporting
+                # what was detected rather than a confusing crash.
+                steps = ", ".join(i.intent for i in intents)
+                result = {
+                    "intent": "unsupported",
+                    "content": (
+                        f"This request needs multiple different capabilities working together ({steps}), "
+                        "but AgentForge could not build a reliable plan for it right now. Please try "
+                        "rephrasing the request, or ask for one part of it at a time."
+                    ),
+                    "sources": [],
+                }
         else:
             result = _call_with_retry(lambda: CrewEngine().run(primary, prompt, context, emitter, repo_url=repo_url, github_token=github_token, session_id=session_id, gmail_session_id=gmail_session_id), emitter, "workflow")
         emitter.emit("result", result)

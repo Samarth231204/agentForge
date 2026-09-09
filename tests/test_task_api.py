@@ -173,22 +173,25 @@ def test_a_gmail_token_store_outage_does_not_fail_an_unrelated_task(monkeypatch)
     assert events[-1] == {**events[-1], "type": "task_completed", "data": {"status": "completed"}}
 
 
-def test_a_compound_request_reports_a_clear_not_yet_available_message(monkeypatch):
-    """Phase 6 detects multi-intent requests correctly, but the pipeline
-    executor to actually run one doesn't exist until later phases — this
-    must report that plainly instead of silently only running the first
-    detected intent, or crashing."""
-    import backend.main as main
+def _compound_intents():
+    return [
+        Intent(intent="research", confidence=0.9, reason="find companies", task_summary="x"),
+        Intent(intent="send_email", confidence=0.85, reason="email each one", task_summary="y"),
+    ]
 
-    monkeypatch.setattr(
-        main.IntentParser,
-        "parse_intents",
-        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: [
-            Intent(intent="research", confidence=0.9, reason="find companies", task_summary="x"),
-            Intent(intent="send_email", confidence=0.85, reason="email each one", task_summary="y"),
-        ],
-    )
-    emitter = EventEmitter("test-compound")
+
+def test_a_compound_request_with_a_valid_plan_runs_the_pipeline_executor(monkeypatch):
+    """Phase 11: a compound request that the planner can turn into a valid
+    plan actually executes it, rather than reporting "not available yet"."""
+    import backend.main as main
+    from backend.pipeline_planner import PipelinePlan, PipelineStep
+
+    monkeypatch.setattr(main.IntentParser, "parse_intents", lambda _self, _p, _c, _r=False, _g=False: _compound_intents())
+    fake_plan = PipelinePlan(steps=[PipelineStep(name="only_step", blueprint="single_agent_loop", intent="research", instructions="do it")], summary="test plan")
+    monkeypatch.setattr(main, "plan_pipeline", lambda *_a, **_k: fake_plan)
+    monkeypatch.setattr(main, "execute_pipeline", lambda *_a, **_k: "the pipeline ran and produced this")
+
+    emitter = EventEmitter("test-compound-executed")
     main._run_task("Find AI job postings and email each company's talent team", "", "", "", "", "", "", emitter)
 
     events = []
@@ -202,10 +205,38 @@ def test_a_compound_request_reports_a_clear_not_yet_available_message(monkeypatc
     assert intent_event["data"]["compound"] is True
     assert intent_event["data"]["all_intents"] == ["research", "send_email"]
 
+    workflow_event = next(e for e in events if e["type"] == "workflow_started")
+    assert workflow_event["data"]["workflow"] == "dynamic_pipeline"
+    assert workflow_event["data"]["agents"] == ["only_step"]
+
     result_event = next(e for e in events if e["type"] == "result")
-    assert "not available yet" in result_event["data"]["content"] or "isn't available yet" in result_event["data"]["content"]
+    assert result_event["data"]["content"] == "the pipeline ran and produced this"
+    assert events[-1] == {**events[-1], "type": "task_completed", "data": {"status": "completed"}}
+
+
+def test_a_compound_request_the_planner_cannot_plan_reports_a_clear_message(monkeypatch):
+    """If the planner itself fails (every candidate model produced an
+    invalid plan), this must report that plainly rather than crash or
+    silently only run the first detected intent."""
+    import backend.main as main
+
+    monkeypatch.setattr(main.IntentParser, "parse_intents", lambda _self, _p, _c, _r=False, _g=False: _compound_intents())
+    monkeypatch.setattr(main, "plan_pipeline", lambda *_a, **_k: None)
+
+    emitter = EventEmitter("test-compound-unplannable")
+    main._run_task("Find AI job postings and email each company's talent team", "", "", "", "", "", "", emitter)
+
+    events = []
+    while True:
+        event = emitter.queue.get()
+        if event is None:
+            break
+        events.append(event.model_dump(mode="json"))
+
+    result_event = next(e for e in events if e["type"] == "result")
     assert "research" in result_event["data"]["content"]
     assert "send_email" in result_event["data"]["content"]
+    assert "could not build a reliable plan" in result_event["data"]["content"]
 
     assert events[-1] == {**events[-1], "type": "task_completed", "data": {"status": "completed"}}
 

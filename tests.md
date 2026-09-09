@@ -190,3 +190,31 @@ Prerequisites for any of the checks below: `.venv312` set up with `requirements.
    Should print a multi-step plan, likely including at least one `parallel_fanout` step capped at `fanout=3` (matching "top 3"), with `depends_on` chaining steps in a sensible order. Try a few different phrasings — the plan's exact shape (single-agent vs. fan-out) legitimately varies with how explicit the request is about needing individual site visits.
 3. Nothing to check on the frontend for this phase either — same reason as Phase 7/8/9.
 
+---
+
+## Phase 11 — Pipeline executor
+
+**What changed:** compound requests now actually run — `main.py` calls the Phase 10 planner then this phase's executor, which runs each step against the real Phase 8 blueprints and real tools, threading state through Phase 9's Redis store, with independent steps genuinely running concurrently. This is the phase where the whole roadmap's motivating example becomes real.
+
+**Validate it yourself:**
+
+1. Run the automated tests:
+   ```
+   .venv312/bin/python -m pytest tests/test_pipeline_executor.py tests/test_task_api.py -v
+   ```
+2. Start the backend and run a genuinely compound request — **avoid words like "visit"/"go to"/"open"/"book a"**, since those trigger the older fast keyword-based single-intent path by design, bypassing the new pipeline system entirely (this tripped us up during Phase 11 testing too):
+   ```
+   curl -s -X POST http://localhost:8000/tasks -H "Content-Type: application/json" \
+     -d '{"prompt": "find the top 3 most popular programming languages, then check each one'"'"'s official website for its current stable release version", "context": ""}' \
+     -o result.json -w "HTTP %{http_code}\n"
+   python3 -c "
+   import json
+   data = json.load(open('result.json'))
+   for e in data['events']:
+       print(e['type'], '-', str(e['data'])[:200])
+   "
+   ```
+   This involves real browser automation across multiple sites and can take several minutes — expect `intent_detected` to show `"compound": true`, a `workflow_started` with `"workflow": "dynamic_pipeline"` listing every step name, and a final `result` whose `content` reports each step's real output (including an honest "could not finish" note for any branch that hit a real site issue — that's correct behavior, not a bug, per this project's grounding discipline).
+3. While it's running, you can confirm genuine concurrency yourself: `ps aux | grep chromium | grep -v grep | wc -l` should show multiple Chromium processes at once during a `parallel_fanout` step, not just one.
+4. This flows through the same `/tasks` response shape (`intent`/`content`/`sources`) every other workflow already uses, so it renders correctly in the real Streamlit frontend today with zero frontend changes — try the same prompt through the actual UI.
+
