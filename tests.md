@@ -38,3 +38,30 @@ Prerequisites for any of the checks below: `.venv312` set up with `requirements.
    print('response:', response.choices[0].message.content)
    "
    ```
+
+---
+
+## Phase 6 — Multi-intent classification
+
+**What changed:** `IntentParser` can now detect a compound request (one needing more than one of the 6 intent categories) instead of always forcing a single classification. Also fixes a real bug where the classifier occasionally returned an invalid `constraints` field and silently gave up rather than trying other models.
+
+**Validate it yourself:**
+
+1. Run the automated tests:
+   ```
+   .venv312/bin/python -m pytest tests/test_intent_parser.py tests/test_task_api.py -v
+   ```
+2. Start the backend (`.venv312/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000`) and confirm an ordinary single-intent request still works exactly as before:
+   ```
+   curl -s -X POST http://localhost:8000/tasks -H "Content-Type: application/json" \
+     -d '{"prompt": "what is the capital of France", "context": ""}' | python3 -m json.tool
+   ```
+   Should classify as `research` and return a real answer (this specific prompt used to intermittently fail before the `constraints` bug fix — if you see "I could not reliably classify this request," run it again and let me know, since that would mean a regression).
+3. Confirm a genuinely compound request is detected and handled gracefully (not crashed, not silently truncated to one step):
+   ```
+   curl -s -X POST http://localhost:8000/tasks -H "Content-Type: application/json" \
+     -d '{"prompt": "research the top 3 AI companies hiring right now, then reach out to their recruiting teams about job opportunities", "context": "", "gmail_session_id": "some-session"}' | python3 -m json.tool
+   ```
+   Look for an `intent_detected` event with `"compound": true` and `"all_intents": ["research", "send_email"]` (or similar), and a `result` event explaining that multi-step pipelines aren't runnable yet. Note: a prompt containing exact phrases like "send an email" will instead hit the fast keyword-based single-intent path (by design) and never reach this compound-detection logic — phrase it more indirectly (as above) to actually exercise the LLM classifier.
+4. This flows through the existing `/tasks` endpoint and event shape unchanged, so it's already visible in the real Streamlit frontend today — submit either prompt above through the actual UI and confirm the result panel renders correctly either way.
+

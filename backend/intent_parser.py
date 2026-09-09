@@ -7,7 +7,7 @@ import re
 from typing import Any, Literal
 
 import litellm
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.config import Settings, get_settings
 from backend.llm_fallback import build_llm_candidates, is_rate_limited
@@ -22,22 +22,56 @@ class Intent(BaseModel):
     task_summary: str = Field(min_length=1, max_length=500)
     constraints: list[str] = Field(default_factory=list)
 
+    @field_validator("constraints", mode="before")
+    @classmethod
+    def _coerce_string_constraints(cls, value: Any) -> Any:
+        # Real, reproduced bug: the classifier model occasionally returns
+        # "constraints":"" (an empty string) instead of "constraints":[]
+        # when there are none — a plausible-looking but schema-invalid
+        # shape. Pydantic's strict list[str] rejected this outright, which
+        # burned both of parse()'s retry attempts on a content problem that
+        # had nothing to do with the actual classification, then gave up
+        # entirely rather than trying any other candidate model. Coerce
+        # instead of rejecting: empty string -> [], non-empty string -> a
+        # single-item list, anything else passes through unchanged for
+        # Pydantic's own list[str] validation to check normally.
+        if isinstance(value, str):
+            return [] if not value.strip() else [value]
+        return value
+
+
+class IntentPlan(BaseModel):
+    """One or more Intents, in the order they should run. Most requests
+    produce exactly one; a genuinely compound request (e.g. "research X,
+    then visit each site, then email them") produces several — detection
+    only, not decomposition into concrete pipeline steps, which is a later
+    phase's job once blueprints/tools/a planner exist to act on it."""
+
+    intents: list[Intent] = Field(min_length=1)
+
 
 SYSTEM_PROMPT = (
-    "You classify requests for an AgentForge agent application. Return JSON only, with keys "
-    "intent, confidence, reason, task_summary, constraints. Valid intent values: research, "
-    "draft_email, send_email, github, booking, unsupported. research is for finding, comparing, explaining, or summarizing "
-    "public information. draft_email is for writing or revising an email; no email can be sent "
-    "in this phase. send_email is for actually sending an email through a connected Gmail account "
-    "(only ever choose this if the user clearly wants the email sent, not merely drafted). "
-    "github is for repository changes, tests, branches, or pull requests. "
-    "booking is for browser automation on public websites: reservations, checking availability, "
-    "filling out a public form, or navigating a specific site and interacting with it (clicking, "
-    "searching within the site, reading a resulting page) — even if the underlying goal looks like "
-    "finding information. If the request names or clearly implies visiting a specific website and "
-    "doing something on it, choose booking over research. research is only for an open-ended web "
-    "search with no specific site to visit. Never choose booking for a login or a payment. "
-    "unsupported is for logins, payments, or any action outside research, email drafting, GitHub, and booking."
+    "You classify requests for an AgentForge agent application. Return JSON only, with a single "
+    "key \"intents\": an array of one or more classification objects, each with keys intent, "
+    "confidence, reason, task_summary, constraints. Return exactly one object for an ordinary, "
+    "single-purpose request — this is the overwhelmingly common case. Return more than one object, "
+    "in the order they should run, only when the request genuinely cannot be satisfied by a single "
+    "intent category — e.g. it asks to research something AND separately act on what's found (send "
+    "an email about it, book something related to it). Do not split a single coherent task into "
+    "multiple objects just because it has several steps within one category. Valid intent values: "
+    "research, draft_email, send_email, github, booking, unsupported. research is for finding, "
+    "comparing, explaining, or summarizing public information. draft_email is for writing or "
+    "revising an email; no email can be sent in this phase. send_email is for actually sending an "
+    "email through a connected Gmail account (only ever choose this if the user clearly wants the "
+    "email sent, not merely drafted). github is for repository changes, tests, branches, or pull "
+    "requests. booking is for browser automation on public websites: reservations, checking "
+    "availability, filling out a public form, or navigating a specific site and interacting with it "
+    "(clicking, searching within the site, reading a resulting page) — even if the underlying goal "
+    "looks like finding information. If the request names or clearly implies visiting a specific "
+    "website and doing something on it, choose booking over research. research is only for an "
+    "open-ended web search with no specific site to visit. Never choose booking for a login or a "
+    "payment. unsupported is for logins, payments, or any action outside research, email drafting, "
+    "GitHub, and booking."
 )
 
 
@@ -52,9 +86,22 @@ class IntentParser:
         self._client = client or litellm.completion
 
     def parse(self, prompt: str, context: str = "", has_repo_context: bool = False, has_gmail_context: bool = False) -> Intent:
+        """Single-intent entry point — every existing caller (main.py,
+        every one of the 6 fixed workflows) keeps using this, unchanged in
+        signature and behavior. Compound requests still classify correctly
+        here; this simply reports only the first (and, for the overwhelming
+        majority of requests, only) detected intent. Use parse_intents() to
+        see the full list."""
+        return self.parse_intents(prompt, context, has_repo_context, has_gmail_context)[0]
+
+    def parse_intents(self, prompt: str, context: str = "", has_repo_context: bool = False, has_gmail_context: bool = False) -> list[Intent]:
+        """Returns one or more Intents, in the order they should run. A
+        genuinely compound request (e.g. "research X, then email each
+        result") returns more than one; everything else returns exactly
+        one, same as parse() always has."""
         forced = self._forced_intent(prompt, has_repo_context, has_gmail_context)
         if forced is not None:
-            return forced
+            return [forced]
         settings = self._settings or get_settings()
         repo_note = (
             "\\nNote: The user has a specific GitHub repository connected for this session "
@@ -91,7 +138,8 @@ class IntentParser:
                     break
                 try:
                     content = message.choices[0].message.content or "{}"
-                    return Intent.model_validate(json.loads(content))
+                    plan = IntentPlan.model_validate(json.loads(content))
+                    return plan.intents
                 except (json.JSONDecodeError, ValidationError, AttributeError, IndexError):
                     continue
             if not provider_failed:
@@ -100,7 +148,7 @@ class IntentParser:
                 # problem, so stop here rather than cascading through the
                 # rest of the candidate list.
                 break
-        return Intent(intent="unsupported", confidence=0.0, reason="I could not reliably classify this request. Try rephrasing it as research or an email draft.", task_summary="Unclassified request")
+        return [Intent(intent="unsupported", confidence=0.0, reason="I could not reliably classify this request. Try rephrasing it as research or an email draft.", task_summary="Unclassified request")]
 
     _FILE_EXTENSION_PATTERN = re.compile(r"\b[\w-]+\.(html?|css|js|jsx|ts|tsx|py|json|ya?ml|md|txt|java|go|rb|c|cpp|h|sql|sh)\b")
     # A navigation verb followed by anything other than a generic English

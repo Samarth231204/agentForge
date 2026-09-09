@@ -134,9 +134,32 @@ def _run_task(prompt: str, context: str, repo_url: str, github_token: str, sessi
     try:
         has_repo_context = bool(repo_url and github_token)
         has_gmail_context = _is_gmail_connected(gmail_session_id)
-        intent = _call_with_retry(lambda: IntentParser().parse(prompt, context, has_repo_context, has_gmail_context), emitter, "intent classification")
-        emitter.emit("intent_detected", {"intent": intent.intent, "confidence": intent.confidence, "reason": intent.reason})
-        result = _call_with_retry(lambda: CrewEngine().run(intent, prompt, context, emitter, repo_url=repo_url, github_token=github_token, session_id=session_id, gmail_session_id=gmail_session_id), emitter, "workflow")
+        intents = _call_with_retry(lambda: IntentParser().parse_intents(prompt, context, has_repo_context, has_gmail_context), emitter, "intent classification")
+        primary = intents[0]
+        intent_event: dict = {"intent": primary.intent, "confidence": primary.confidence, "reason": primary.reason}
+        if len(intents) > 1:
+            intent_event["compound"] = True
+            intent_event["all_intents"] = [i.intent for i in intents]
+        emitter.emit("intent_detected", intent_event)
+        if len(intents) > 1:
+            # Phase 6 (multi-intent classification) is ahead of the pipeline
+            # executor that would actually run a compound request (Phases
+            # 8/10/11) — detected correctly here, but nothing exists yet to
+            # act on more than one intent, so this reports that plainly
+            # rather than silently only running the first step.
+            steps = ", ".join(i.intent for i in intents)
+            result = {
+                "intent": "unsupported",
+                "content": (
+                    f"This request needs multiple different capabilities working together ({steps}). "
+                    "AgentForge detected that correctly, but running a multi-step pipeline like this "
+                    "isn't available yet — support for it is coming in a later phase. For now, try "
+                    "asking for one part of this at a time."
+                ),
+                "sources": [],
+            }
+        else:
+            result = _call_with_retry(lambda: CrewEngine().run(primary, prompt, context, emitter, repo_url=repo_url, github_token=github_token, session_id=session_id, gmail_session_id=gmail_session_id), emitter, "workflow")
         emitter.emit("result", result)
         emitter.emit("task_completed", {"status": "completed"})
         Thread(

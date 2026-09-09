@@ -23,10 +23,10 @@ def test_json_task_endpoint_returns_ordered_events(monkeypatch):
 
     monkeypatch.setattr(
         main.IntentParser,
-        "parse",
-        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: Intent(
+        "parse_intents",
+        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: [Intent(
             intent="unsupported", confidence=1, reason="test", task_summary="test"
-        ),
+        )],
     )
     with TestClient(main.app) as client:
         response = client.post("/tasks", json={"prompt": "Create a GitHub pull request", "context": ""})
@@ -54,10 +54,10 @@ def test_history_endpoint_returns_entries_after_a_completed_task(monkeypatch):
     monkeypatch.setattr(main, "run_critic", lambda *_a, **_k: None)
     monkeypatch.setattr(
         main.IntentParser,
-        "parse",
-        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: Intent(
+        "parse_intents",
+        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: [Intent(
             intent="research", confidence=1, reason="test", task_summary="test"
-        ),
+        )],
     )
     monkeypatch.setattr(main.CrewEngine, "run", lambda self, *_a, **_k: {"intent": "research", "content": "Some answer", "sources": []})
     monkeypatch.setattr(main, "Thread", _SyncThread)
@@ -124,10 +124,10 @@ def test_side_effect_failures_never_affect_the_task_response(monkeypatch):
     monkeypatch.setattr(main, "run_critic", exploding_critic)
     monkeypatch.setattr(
         main.IntentParser,
-        "parse",
-        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: Intent(
+        "parse_intents",
+        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: [Intent(
             intent="research", confidence=1, reason="test", task_summary="test"
-        ),
+        )],
     )
     monkeypatch.setattr(main.CrewEngine, "run", lambda self, *_a, **_k: {"intent": "research", "content": "Some answer", "sources": []})
     monkeypatch.setattr(main, "Thread", _SyncThread)
@@ -155,10 +155,10 @@ def test_a_gmail_token_store_outage_does_not_fail_an_unrelated_task(monkeypatch)
     monkeypatch.setattr(main, "get_token_store", lambda: ExplodingTokenStore())
     monkeypatch.setattr(
         main.IntentParser,
-        "parse",
-        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: Intent(
+        "parse_intents",
+        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: [Intent(
             intent="unsupported", confidence=1, reason="test", task_summary="test"
-        ),
+        )],
     )
     emitter = EventEmitter("test-gmail-outage")
     main._run_task("Research something", "", "", "", "", "some-gmail-session", "", emitter)
@@ -173,13 +173,50 @@ def test_a_gmail_token_store_outage_does_not_fail_an_unrelated_task(monkeypatch)
     assert events[-1] == {**events[-1], "type": "task_completed", "data": {"status": "completed"}}
 
 
+def test_a_compound_request_reports_a_clear_not_yet_available_message(monkeypatch):
+    """Phase 6 detects multi-intent requests correctly, but the pipeline
+    executor to actually run one doesn't exist until later phases — this
+    must report that plainly instead of silently only running the first
+    detected intent, or crashing."""
+    import backend.main as main
+
+    monkeypatch.setattr(
+        main.IntentParser,
+        "parse_intents",
+        lambda _self, _prompt, _context, _has_repo_context=False, _has_gmail_context=False: [
+            Intent(intent="research", confidence=0.9, reason="find companies", task_summary="x"),
+            Intent(intent="send_email", confidence=0.85, reason="email each one", task_summary="y"),
+        ],
+    )
+    emitter = EventEmitter("test-compound")
+    main._run_task("Find AI job postings and email each company's talent team", "", "", "", "", "", "", emitter)
+
+    events = []
+    while True:
+        event = emitter.queue.get()
+        if event is None:
+            break
+        events.append(event.model_dump(mode="json"))
+
+    intent_event = next(e for e in events if e["type"] == "intent_detected")
+    assert intent_event["data"]["compound"] is True
+    assert intent_event["data"]["all_intents"] == ["research", "send_email"]
+
+    result_event = next(e for e in events if e["type"] == "result")
+    assert "not available yet" in result_event["data"]["content"] or "isn't available yet" in result_event["data"]["content"]
+    assert "research" in result_event["data"]["content"]
+    assert "send_email" in result_event["data"]["content"]
+
+    assert events[-1] == {**events[-1], "type": "task_completed", "data": {"status": "completed"}}
+
+
 def test_rate_limited_task_has_a_clear_retryable_event(monkeypatch):
     import backend.main as main
 
     class RateLimitError(Exception):
         pass
 
-    monkeypatch.setattr(main.IntentParser, "parse", lambda *_args, **_kwargs: (_ for _ in ()).throw(RateLimitError("rate_limit_exceeded")))
+    monkeypatch.setattr(main.IntentParser, "parse_intents", lambda *_args, **_kwargs: (_ for _ in ()).throw(RateLimitError("rate_limit_exceeded")))
     emitter = EventEmitter("test-rate-limit")
     main._run_task("Research something", "", "", "", "", "", "", emitter)
     events = []

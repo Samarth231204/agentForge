@@ -16,7 +16,7 @@ class FakeClient:
 
 
 def test_parses_research_intent_from_model_json():
-    client = FakeClient([json.dumps({"intent": "research", "confidence": 0.9, "reason": "Research request", "task_summary": "Find patterns", "constraints": []})])
+    client = FakeClient([json.dumps({"intents": [{"intent": "research", "confidence": 0.9, "reason": "Research request", "task_summary": "Find patterns", "constraints": []}]})])
     result = IntentParser(client=client).parse("Find FastAPI SSE patterns")
     assert result.intent == "research"
     assert result.confidence == 0.9
@@ -49,7 +49,7 @@ def test_advances_to_the_next_candidate_model_on_a_provider_error():
         models_tried.append(model)
         if len(models_tried) == 1:
             raise litellm.RateLimitError(message="rate_limit_exceeded", model=model, llm_provider="groq")
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"intent": "research", "confidence": 0.8, "reason": "ok", "task_summary": "x", "constraints": []})))])
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"intents": [{"intent": "research", "confidence": 0.8, "reason": "ok", "task_summary": "x", "constraints": []}]})))])
 
     result = IntentParser(client=flaky_client).parse("Do something unclear")
     assert result.intent == "research"
@@ -91,7 +91,7 @@ def test_routes_named_site_navigation_to_booking_without_a_literal_url():
 
 
 def test_generic_open_phrasing_does_not_trigger_booking():
-    client = FakeClient([json.dumps({"intent": "research", "confidence": 0.6, "reason": "generic", "task_summary": "x", "constraints": []})])
+    client = FakeClient([json.dumps({"intents": [{"intent": "research", "confidence": 0.6, "reason": "generic", "task_summary": "x", "constraints": []}]})])
     result = IntentParser(client=client).parse("Open a new tab and tell me a joke")
     assert result.intent == "research"  # falls through to the (fake) model rather than being forced to booking
 
@@ -110,6 +110,63 @@ def test_routes_file_creation_to_github_when_repo_context_is_present_without_cal
 
 
 def test_same_file_request_is_not_forced_to_github_without_repo_context():
-    client = FakeClient([json.dumps({"intent": "unsupported", "confidence": 0.5, "reason": "no repo context", "task_summary": "x", "constraints": []})])
+    client = FakeClient([json.dumps({"intents": [{"intent": "unsupported", "confidence": 0.5, "reason": "no repo context", "task_summary": "x", "constraints": []}]})])
     result = IntentParser(client=client).parse('create a new file called "welcome.html"', has_repo_context=False)
     assert result.intent == "unsupported"  # falls through to the (fake) model rather than being forced
+
+
+# --- parse_intents: multi-intent (Phase 6) ---------------------------------
+
+
+def test_parse_intents_returns_a_single_element_list_for_an_ordinary_request():
+    client = FakeClient([json.dumps({"intents": [{"intent": "research", "confidence": 0.9, "reason": "ok", "task_summary": "x", "constraints": []}]})])
+    intents = IntentParser(client=client).parse_intents("Find FastAPI SSE patterns")
+    assert len(intents) == 1
+    assert intents[0].intent == "research"
+
+
+def test_parse_intents_returns_multiple_intents_for_a_compound_request():
+    client = FakeClient([json.dumps({"intents": [
+        {"intent": "research", "confidence": 0.9, "reason": "find companies", "task_summary": "Find AI job postings", "constraints": []},
+        {"intent": "send_email", "confidence": 0.85, "reason": "email each one", "task_summary": "Email each company's talent team", "constraints": []},
+    ]})])
+    intents = IntentParser(client=client).parse_intents("Find AI job postings and email each company's talent team", has_gmail_context=True)
+    assert [i.intent for i in intents] == ["research", "send_email"]
+
+
+def test_parse_returns_only_the_first_intent_for_a_compound_request():
+    # parse() (used by every existing single-intent caller) must keep
+    # working unchanged even when the classifier detects a compound
+    # request — it just reports the first step, same return type as ever.
+    client = FakeClient([json.dumps({"intents": [
+        {"intent": "research", "confidence": 0.9, "reason": "find companies", "task_summary": "x", "constraints": []},
+        {"intent": "send_email", "confidence": 0.85, "reason": "email each one", "task_summary": "y", "constraints": []},
+    ]})])
+    result = IntentParser(client=client).parse("Find AI job postings and email each company's talent team", has_gmail_context=True)
+    assert result.intent == "research"
+
+
+def test_forced_intents_are_still_single_element_lists():
+    intents = IntentParser(client=FakeClient([])).parse_intents("Open a pull request on GitHub")
+    assert len(intents) == 1
+    assert intents[0].intent == "github"
+
+
+# --- Intent.constraints: string-coercion bug fix ---------------------------
+
+
+def test_empty_string_constraints_are_coerced_to_an_empty_list():
+    # Real, reproduced bug: the classifier model occasionally returns
+    # "constraints":"" instead of "constraints":[] — previously rejected
+    # outright by Pydantic's strict list[str], burning both retry attempts
+    # on a content problem unrelated to the actual classification.
+    client = FakeClient([json.dumps({"intents": [{"intent": "research", "confidence": 0.9, "reason": "ok", "task_summary": "x", "constraints": ""}]})])
+    result = IntentParser(client=client).parse("Find something")
+    assert result.intent == "research"
+    assert result.constraints == []
+
+
+def test_non_empty_string_constraints_are_coerced_to_a_single_item_list():
+    client = FakeClient([json.dumps({"intents": [{"intent": "research", "confidence": 0.9, "reason": "ok", "task_summary": "x", "constraints": "must be recent"}]})])
+    result = IntentParser(client=client).parse("Find something")
+    assert result.constraints == ["must be recent"]
