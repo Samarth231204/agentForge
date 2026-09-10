@@ -135,6 +135,13 @@ if st.session_state.pending_plan:
         st.session_state.pending_plan = None
         plan_slot.empty()
         _run_task(run_prompt, run_context, approved_plan=plan_to_run)
+        # The prompt/context inputs above were rendered disabled at the top
+        # of this run (pending_plan was still truthy then) and nothing
+        # re-renders them afterward on their own — without this, the input
+        # box is left stuck disabled with no interactive widget left to
+        # trigger a fresh render, a real dead end a user can only escape by
+        # refreshing the page (losing session/history/memory continuity).
+        st.rerun()
     elif discard_clicked:
         st.session_state.pending_plan = None
         st.rerun()
