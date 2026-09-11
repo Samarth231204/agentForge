@@ -10,7 +10,7 @@ import streamlit as st
 
 def render_plan_review(plan: dict) -> tuple[bool, str, bool, bool]:
     """Returns (revise_clicked, revision_text, generate_clicked, discard_clicked)."""
-    st.subheader("Proposed plan")
+    st.markdown('<div class="af-card"><div class="af-card-title">Proposed plan</div>', unsafe_allow_html=True)
     st.write(plan.get("summary", ""))
 
     for step in plan.get("steps", []):
@@ -31,5 +31,6 @@ def render_plan_review(plan: dict) -> tuple[bool, str, bool, bool]:
     revise_clicked = col_revise.button("Revise plan", disabled=not revision_text.strip())
     generate_clicked = col_generate.button("Generate", type="primary")
     discard_clicked = col_discard.button("Discard")
+    st.markdown("</div>", unsafe_allow_html=True)
 
     return revise_clicked, revision_text, generate_clicked, discard_clicked

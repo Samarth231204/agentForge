@@ -12,10 +12,12 @@ from components.chat_input import render_chat_input
 from components.event_log import render_event_log
 from components.plan_review import render_plan_review
 from components.sidebar import render_sidebar
+from utils import theme
 from utils.sse_client import propose_pipeline_plan, stream_task
 from utils.state import initialize_state, reset_state
 
-st.set_page_config(page_title="AgentForge", page_icon="⚒️", layout="wide")
+st.set_page_config(page_title="AgentForge", page_icon="✦", layout="wide")
+theme.inject()
 initialize_state()
 if not st.session_state.gmail_session_id:
     st.session_state.gmail_session_id = uuid.uuid4().hex
@@ -27,8 +29,8 @@ if reset_requested:
     reset_state()
     st.rerun()
 
-st.title("⚒️ AgentForge")
-st.write("A visible, multi-agent workspace for public-web research, email, GitHub, booking, and multi-step pipelines.")
+theme.hero("AgentForge", "A visible, multi-agent workspace for public-web research, email, GitHub, booking, and multi-step pipelines.")
+st.write("")
 submitted, prompt, context = render_chat_input(st.session_state.is_running or bool(st.session_state.pending_plan))
 
 left, right = st.columns((1, 1))
@@ -153,9 +155,10 @@ with log_slot.container():
 with result_slot.container():
     if st.session_state.result:
         result = st.session_state.result
-        st.subheader("Result")
+        st.markdown('<div class="af-card"><div class="af-card-title">Result</div>', unsafe_allow_html=True)
         st.markdown(result.get("content", ""))
         if result.get("sources"):
             st.caption("Sources")
             for source in result["sources"]:
                 st.markdown(f"- [{source}]({source})")
+        st.markdown("</div>", unsafe_allow_html=True)
