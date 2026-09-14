@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8000";
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:4000";
 
 function App() {
   const [status, setStatus] = useState("checking...");
