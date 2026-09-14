@@ -29,6 +29,28 @@ const INTENTS = [
       /\bdifference between\b/i,
     ],
   },
+  {
+    name: "write",
+    description:
+      "Any content-generation request — drafting, composing, or creatively writing something for the user, as opposed to answering a factual question.",
+    patterns: [
+      // A writing-verb ... writing-noun, in EITHER order, with anything
+      // (or nothing) in between — [\s\S]* is what makes "plot an
+      // interesting story" match, not just the adjacent "plot a story".
+      /\b(write|draft|compose|plot|create|generate|craft|invent|imagine|make up)\b[\s\S]*\b(essay|story|stories|poem|poetry|letter|email|mail|blog|article|script|speech|song|lyrics|report|summary|caption|post|proposal|paragraph|chapter|novel|note|bio|tagline|slogan|pitch|narrative|plot|plotline)\b/i,
+      /\b(essay|story|poem|letter|email|blog|article|script|speech|song|lyrics|report|proposal|novel|narrative)\b[\s\S]*\b(write|draft|compose|plot|create|generate|craft|invent|imagine)\b/i,
+      /\bhelp me write\b/i,
+      /\bcome up with (a|an|some)\b[\s\S]*\b(story|poem|caption|tagline|slogan|title|name|idea)\b/i,
+      /\bgive me (a|an)\b[\s\S]*\b(story|poem|essay|letter|email|script|speech|caption|tagline)\b/i,
+      // Broadest catch-all last: anything else mentioning one of these verbs
+      // at all still counts, since this intent is meant to cover "everything
+      // related to write" per spec, not just the phrasings above.
+      /\bwrite\b/i,
+      /\bdraft\b/i,
+      /\bcompose\b/i,
+      /\bplot\b/i,
+    ],
+  },
 ];
 
 /**
