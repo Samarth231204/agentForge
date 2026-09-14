@@ -1,23 +1,12 @@
 # Secrets / environment
 .env
 .env.local
+server/.env
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.egg-info/
-build/
+# Node
+node_modules/
 dist/
-
-# Virtual environments
-.venv/
-.venv312/
-venv/
-env/
+.vite/
 
 # OS
 .DS_Store
@@ -26,10 +15,3 @@ env/
 .vscode/
 .idea/
 .claude/settings.local.json
-
-# Internal planning docs kept local only, not shipped with the repo
-AGENTFORGE_FULL_IMPLEMENTATION.md
-currentStatus.md
-IMPLEMENTATION_PHASE_1.md
-IMPLEMENTATION_PHASE_2.md
-IMPLEMENTATION_PHASE_3.md
