@@ -1,4 +1,4 @@
-import { completeChat } from "../llmClient.js";
+import { completeWithFallback } from "../llmFallback.js";
 
 /**
  * The research intent's whole job: answer directly from the model's own
@@ -10,10 +10,13 @@ const SYSTEM_PROMPT =
   "You answer directly and concisely from your own knowledge. " +
   "If you are not confident about a fact, say so explicitly rather than guessing.";
 
-export async function runResearch(prompt) {
-  const content = await completeChat([
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: prompt },
-  ]);
-  return { intent: "research", content };
+export async function runResearch(prompt, _sessionId, queryId) {
+  const message = await completeWithFallback({
+    queryId,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: prompt },
+    ],
+  });
+  return { intent: "research", content: message.content ?? "" };
 }

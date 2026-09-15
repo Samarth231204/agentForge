@@ -1,30 +1,31 @@
 import OpenAI from "openai";
 
 /**
- * Groq's API is OpenAI-compatible, so the official `openai` SDK works
- * against it unmodified — just point baseURL at Groq's endpoint instead of
- * OpenAI's, and use a Groq API key.
+ * Every provider in the fallback chain (Groq, Gemini, OpenRouter) speaks
+ * the same OpenAI-compatible chat-completions format, so one client class
+ * covers all three — only baseURL and the API key differ per provider.
  */
-let client = null;
+const PROVIDERS = {
+  groq: { baseURL: "https://api.groq.com/openai/v1", apiKeyEnv: "GROQ_API_KEY" },
+  gemini: { baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", apiKeyEnv: "GEMINI_API_KEY" },
+  openrouter: { baseURL: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY" },
+};
 
-function getClient() {
-  if (!client) {
-    if (!process.env.GROQ_API_KEY) {
-      throw new Error("GROQ_API_KEY is not set in server/.env");
-    }
-    client = new OpenAI({
-      apiKey: process.env.GROQ_API_KEY,
-      baseURL: "https://api.groq.com/openai/v1",
-    });
+const clients = {};
+
+function getClient(provider) {
+  if (!clients[provider]) {
+    const config = PROVIDERS[provider];
+    if (!config) throw new Error(`Unknown LLM provider "${provider}"`);
+    const apiKey = process.env[config.apiKeyEnv];
+    if (!apiKey) throw new Error(`${config.apiKeyEnv} is not set in server/.env`);
+    clients[provider] = new OpenAI({ apiKey, baseURL: config.baseURL });
   }
-  return client;
+  return clients[provider];
 }
 
-export async function completeChat(messages) {
-  const response = await getClient().chat.completions.create({
-    model: process.env.GROQ_MODEL || "openai/gpt-oss-20b",
-    temperature: 0.3,
-    messages,
-  });
-  return response.choices[0].message.content ?? "";
+/** One completion call against one specific (provider, model) candidate. */
+export async function completeChatOnce({ provider, model, messages, temperature = 0.3 }) {
+  const response = await getClient(provider).chat.completions.create({ model, temperature, messages });
+  return response.choices[0].message;
 }

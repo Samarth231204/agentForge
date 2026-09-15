@@ -9,6 +9,40 @@
  */
 const INTENTS = [
   {
+    // Checked FIRST, deliberately: several github-read phrasings ("tell me
+    // about this repo", "explain this part of the project", "summarize
+    // this file") use the exact same verbs research's patterns look for
+    // ("explain", "describe", "tell me about"). If research were checked
+    // first, a prompt that literally contains a github.com URL or names
+    // "this repo" would still get swallowed by research before github's
+    // own patterns ever ran — confirmed happening in testing before this
+    // reordering. Placing github first costs nothing for genuine research/
+    // write prompts, since those essentially never mention repo/github/
+    // pull-request vocabulary at all.
+    name: "github",
+    description:
+      "A request to read, change, or otherwise act on a GitHub repository — routes to a read-only lookup or a sandboxed change+PR workflow depending on the query's own wording.",
+    patterns: [
+      /\bmake\b[\s\S]*\bchanges?\b[\s\S]*\b(my|this|the) (project|repo|repository|code|codebase)\b/i,
+      /\badd\b[\s\S]*\b(functionality|feature)\b[\s\S]*\b(my|this|the) (project|repo|repository)\b/i,
+      /\bfix\b[\s\S]*\bbug\b[\s\S]*\b(my|this|the) (project|repo|repository|code)\b/i,
+      /\bopen a pull request\b/i,
+      /\bpull request\b/i,
+      /\bpush (this|these|the) changes?\b/i,
+      /\bclone (my|this|the) repo(sitory)?\b/i,
+      /\b(my|this|the) (repo|repository)\b/i,
+      /github\.com\/[\w.-]+\/[\w.-]+/i,
+      /\bgithub\b/i,
+      // A bare PAT is itself an unambiguous github signal — the most
+      // natural reply to "I need a token" is often JUST the token, with no
+      // other github-flavored wording at all (confirmed missing this in
+      // testing: such a reply fell through to "unclassified" and the token
+      // was lost before this pattern was added).
+      /\bghp_[A-Za-z0-9]{20,}\b/,
+      /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+    ],
+  },
+  {
     name: "research",
     description:
       "A direct-knowledge question the LLM can answer on its own, with no external tool (no web search, no browser, no repo access).",

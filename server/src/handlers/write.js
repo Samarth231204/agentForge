@@ -1,4 +1,4 @@
-import { completeChat } from "../llmClient.js";
+import { completeWithFallback } from "../llmFallback.js";
 
 /**
  * The write intent's job: produce the requested piece of writing directly —
@@ -13,10 +13,13 @@ const SYSTEM_PROMPT =
   "piece — no preamble like \"Here is your essay:\", no meta-commentary, " +
   "unless the user explicitly asked for notes or options as well.";
 
-export async function runWrite(prompt) {
-  const content = await completeChat([
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: prompt },
-  ]);
-  return { intent: "write", content };
+export async function runWrite(prompt, _sessionId, queryId) {
+  const message = await completeWithFallback({
+    queryId,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: prompt },
+    ],
+  });
+  return { intent: "write", content: message.content ?? "" };
 }
