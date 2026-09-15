@@ -3,6 +3,27 @@ import "./PromptForm.css";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:4000";
 
+const URL_PATTERN = /(https?:\/\/[^\s]+)/g;
+
+// Splits response text around raw URLs (e.g. the Google OAuth consent link
+// the google intent returns when a session isn't connected yet) so they
+// render as real, clickable <a> tags instead of inert text.
+function renderWithLinks(text) {
+  // URL_PATTERN has a capturing group, so split() interleaves the matched
+  // URLs into the result at odd indices — checking index parity avoids
+  // re-testing against the same stateful global-flag regex (whose lastIndex
+  // would otherwise make repeated .test() calls unreliable).
+  return text.split(URL_PATTERN).map((part, i) =>
+    i % 2 === 1 ? (
+      <a key={i} href={part} target="_blank" rel="noopener noreferrer">
+        {part}
+      </a>
+    ) : (
+      part
+    )
+  );
+}
+
 // One hex session id per page load, reused for every request — this is what
 // ties a follow-up message (e.g. supplying a PAT after being asked) back to
 // the same server-side session state for GitHub tasks.
@@ -70,7 +91,7 @@ export default function PromptForm() {
             </span>
             {result.reason && <span className="intent-reason">{result.reason}</span>}
           </div>
-          <p className="result-content">{result.content}</p>
+          <p className="result-content">{renderWithLinks(result.content)}</p>
         </div>
       )}
     </div>

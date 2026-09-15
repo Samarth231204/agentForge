@@ -8,8 +8,11 @@ import { runResearch } from "./src/handlers/research.js";
 import { runWrite } from "./src/handlers/write.js";
 import { runGithub } from "./src/handlers/github.js";
 import { runBrowse } from "./src/handlers/browse.js";
+import { runGoogle } from "./src/handlers/google.js";
 import { startSessionCleanupListener } from "./src/sessionCleanup.js";
 import { clearQueryContext } from "./src/queryContext.js";
+import { getAuthUrl, exchangeCodeForTokens } from "./src/tools/googleAuth.js";
+import { saveGoogleTokens, getGoogleTokens } from "./src/googleSession.js";
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -24,6 +27,7 @@ const HANDLERS = {
   write: runWrite,
   github: runGithub,
   browse: runBrowse,
+  google: runGoogle,
 };
 
 startSessionCleanupListener();
@@ -33,6 +37,40 @@ app.use(express.json());
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+// Google OAuth: `state` is always the caller's own sessionId, round-tripped
+// unchanged by Google, which is how the resulting token gets tied to the
+// right session with no other state needed. See handlers/google.js for how
+// a missing-token session ends up with this link in a chat reply.
+app.get("/auth/google", (req, res) => {
+  const state = (req.query.state || "").trim();
+  if (!state) return res.status(400).send("Missing state (session id).");
+  try {
+    res.redirect(getAuthUrl(state));
+  } catch (err) {
+    res.status(503).send(err.message);
+  }
+});
+
+app.get("/auth/google/status", async (req, res) => {
+  const state = (req.query.state || "").trim();
+  if (!state) return res.status(400).json({ error: "Missing state (session id)." });
+  const tokens = await getGoogleTokens(state);
+  res.json({ connected: Boolean(tokens) });
+});
+
+app.get("/auth/google/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || !state) return res.status(400).send("<h3>Missing code or state.</h3>");
+  try {
+    const tokens = await exchangeCodeForTokens(code);
+    await saveGoogleTokens(state, tokens);
+    res.send("<h3>Google account connected. You can close this tab and return to AgentForge.</h3>");
+  } catch (err) {
+    console.error("Google OAuth callback failed:", err);
+    res.status(400).send("<h3>Could not connect your Google account. Please close this tab and try again.</h3>");
+  }
 });
 
 app.post("/api/tasks", async (req, res) => {

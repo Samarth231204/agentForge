@@ -17,6 +17,11 @@
  *      node.js" was being answered from the model's own stale training
  *      data by research's broad "what is" pattern, before browse (which
  *      would actually run a live search) ever got a chance to run at all.
+ *   3. "google" before "write" — "draft a mail" / "send an email" share the
+ *      draft/write/compose verbs write's catch-all patterns match against;
+ *      without google checked first, a genuine send request would be
+ *      silently downgraded into write's plain content-generation reply
+ *      instead of ever reaching the Gmail send workflow.
  */
 const INTENTS = [
   {
@@ -45,6 +50,29 @@ const INTENTS = [
       // was lost before this pattern was added).
       /\bghp_[A-Za-z0-9]{20,}\b/,
       /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+    ],
+  },
+  {
+    // Checked before "write": see ORDER MATTERS note above.
+    name: "google",
+    description:
+      "A request to send an email through a connected Google account — Gmail today, other Google sub-intents (calendar, drive) may be added later behind the same top-level intent.",
+    patterns: [
+      /\b(send|draft|compose|write)\b[\s\S]*\b(email|mail|gmail)\b/i,
+      /\bemail\b[\s\S]*\bto\b[\s\S]*@/i,
+      /\bmail\b[\s\S]*\bto\b[\s\S]*@/i,
+      /\bsend\b[\s\S]*\bto\b[\s\S]*@[\w-]+\.[a-z]{2,}\b/i,
+      /\bconnect (my )?google( account)?\b/i,
+      /\bconnect gmail\b/i,
+      /\bgmail\b/i,
+      // A short reply that's essentially just an email address (optionally
+      // with a few filler words like "the recipient is") is itself an
+      // unambiguous signal — the natural reply to "tell me the recipient's
+      // email address" is often JUST the address. Same reasoning as
+      // github's bare-PAT pattern: bounded prefix/suffix length keeps this
+      // from matching a genuinely different, longer message that merely
+      // happens to mention an email address mid-sentence.
+      /^[\s\S]{0,50}[\w.+-]+@[\w-]+\.[a-z]{2,}[\s\S]{0,10}$/i,
     ],
   },
   {
