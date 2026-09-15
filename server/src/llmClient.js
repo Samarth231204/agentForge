@@ -24,8 +24,18 @@ function getClient(provider) {
   return clients[provider];
 }
 
-/** One completion call against one specific (provider, model) candidate. */
-export async function completeChatOnce({ provider, model, messages, temperature = 0.3 }) {
-  const response = await getClient(provider).chat.completions.create({ model, temperature, messages });
+/**
+ * One completion call against one specific (provider, model) candidate.
+ * `tools`, when supplied, requests OpenAI-format tool-calling — used by the
+ * browse intent's agent loop; research/write/github's read-and-change
+ * workflows call this with no tools at all (plain text completion).
+ */
+export async function completeChatOnce({ provider, model, messages, tools, temperature = 0.3 }) {
+  const response = await getClient(provider).chat.completions.create({
+    model,
+    temperature,
+    messages,
+    ...(tools ? { tools } : {}),
+  });
   return response.choices[0].message;
 }

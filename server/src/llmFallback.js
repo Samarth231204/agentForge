@@ -1,21 +1,24 @@
 /**
  * Shared LLM-completion resilience, used by every workflow that calls an
- * LLM (research, write, and both GitHub sub-workflows). Tries a prioritized
- * list of (provider, model) candidates for the exact same call, advancing
- * to the next one only on a transient error (rate limit / 429 / 503 /
- * quota exhausted) — a permanent error (bad request, invalid args) fails
+ * LLM (research, write, github, and browse). Tries a prioritized list of
+ * (provider, model) candidates for the exact same call, advancing to the
+ * next one only on a transient error (rate limit / 429 / 503 / quota
+ * exhausted) — a permanent error (bad request, invalid args) fails
  * immediately instead of cascading through every candidate identically.
  *
  * Ordered best to worst:
- *   1-5. Groq's free tier — as many genuinely usable chat models as the API
- *        actually offers right now (checked live against GET /v1/models;
- *        excludes groq/compound[-mini] — confirmed separately that they
- *        don't support user-defined tool calling despite appearing to — and
- *        excludes the audio/guard/classifier models, which aren't chat
- *        models at all).
- *   6. Gemini — a different provider entirely, so a fresh quota pool once
- *      every Groq candidate is exhausted, not just another way to hit the
- *      same wall.
+ *   1. Gemini — primary for everything, moved to the front after live
+ *      testing on the browse intent's multi-turn tool-calling agent loop
+ *      showed it calling tools cleanly and stopping reliably every time,
+ *      while gpt-oss-120b (the previous default) repeatedly drifted into
+ *      many empty, wasted turns on the same task (confirmed directly:
+ *      10+ consecutive empty turns on one query, a 2+ minute response).
+ *   2-6. Groq's free tier — as many genuinely usable chat models as the
+ *        API actually offers right now (checked live against GET
+ *        /v1/models; excludes groq/compound[-mini] — confirmed separately
+ *        that they don't support user-defined tool calling despite
+ *        appearing to — and excludes the audio/guard/classifier models,
+ *        which aren't chat models at all).
  *   7. OpenRouter — final cross-provider fallback, picked from its public
  *      /api/v1/models listing, live-verified against a real request.
  */
@@ -28,13 +31,27 @@ function buildCandidates() {
   const primaryGroqModel = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
   const groqModels = [primaryGroqModel, ...GROQ_FALLBACK_MODELS.filter((m) => m !== primaryGroqModel)];
 
-  const candidates = groqModels.map((model) => ({ provider: "groq", model }));
-  candidates.push({ provider: "gemini", model: process.env.GEMINI_MODEL || "gemini-3.5-flash-lite" });
-  candidates.push({ provider: "openrouter", model: process.env.OPENROUTER_MODEL || "nvidia/nemotron-3-super-120b-a12b:free" });
-  return candidates;
+  return [
+    { provider: "gemini", model: process.env.GEMINI_MODEL || "gemini-3.5-flash-lite" },
+    ...groqModels.map((model) => ({ provider: "groq", model })),
+    { provider: "openrouter", model: process.env.OPENROUTER_MODEL || "nvidia/nemotron-3-super-120b-a12b:free" },
+  ];
 }
 
-function isRateLimited(err) {
+/**
+ * Renamed from isRateLimited: it's no longer purely about rate limits.
+ * Confirmed via a real failure — a multi-turn browse conversation that
+ * cascaded Gemini -> Groq (Gemini rate-limited) -> back to Gemini (limit
+ * reset a few turns later) crashed with a 400 "missing a thought_signature
+ * in functionCall parts": Gemini requires its own metadata on prior
+ * tool-call turns for conversation continuity, which isn't present when an
+ * earlier turn in the SAME growing conversation was actually answered by a
+ * different provider. That's not a malformed-request problem the next
+ * candidate would hit identically — it's a THIS-PROVIDER-specific
+ * incompatibility with this conversation's history, so it belongs in the
+ * same "try the next candidate" bucket as an actual rate limit.
+ */
+function isRetryableCandidateError(err) {
   const status = err?.status;
   // 413 belongs here too: Groq returns it for "request too large for this
   // model's TPM budget," which is exactly a rate-limit-shaped problem the
@@ -47,35 +64,47 @@ function isRateLimited(err) {
   // provider and error shape.
   if (err?.code === "rate_limit_exceeded" || err?.type === "tokens") return true;
   const text = String(err?.message || err).toLowerCase();
-  return ["rate limit", "rate_limit", "resource_exhausted", "quota", "unavailable", "overloaded", "high demand", "tokens per minute", "request too large"].some((marker) => text.includes(marker));
+  return ["rate limit", "rate_limit", "resource_exhausted", "quota", "unavailable", "overloaded", "high demand", "tokens per minute", "request too large", "thought_signature"].some((marker) => text.includes(marker));
 }
 
 /**
  * @param {string} queryId - unique per HTTP request, NOT per session
  * @param {object[]} messages - the running conversation
+ * @param {object[]} [tools] - OpenAI-format tool schemas, if this call offers tools
  * @param {number} [temperature]
  */
-export async function completeWithFallback({ queryId, messages, temperature }) {
+export async function completeWithFallback({ queryId, messages, tools, temperature }) {
   // Persisted before any candidate is even attempted, so the conversation
   // state is visible in Redis for the whole duration of this query,
   // regardless of which candidate ultimately answers it.
-  await saveQueryContext(queryId, { messages });
+  await saveQueryContext(queryId, { messages, tools: tools?.map((t) => t.function.name) });
 
   const candidates = buildCandidates();
   let lastErr;
 
   for (const candidate of candidates) {
     try {
-      const message = await completeChatOnce({ ...candidate, messages, temperature });
+      const message = await completeChatOnce({ ...candidate, messages, tools, temperature });
       console.log(`[llmFallback] ${candidate.provider}/${candidate.model} answered.`);
       return message;
     } catch (err) {
       lastErr = err;
-      if (!isRateLimited(err)) throw err;
+      if (!isRetryableCandidateError(err)) throw err;
       console.warn(`[llmFallback] ${candidate.provider}/${candidate.model} unavailable (${err.message}) — trying next candidate.`);
     }
   }
   throw lastErr;
+}
+
+/**
+ * The model called a tool name that isn't in the offered schema at all
+ * (hallucinated) — the provider's own server-side validator rejects this
+ * before any message comes back. Not a capacity problem a different
+ * candidate would necessarily avoid; the agent loop uses this to inject a
+ * corrective nudge on the SAME conversation instead of crashing the task.
+ */
+export function isInvalidToolCall(err) {
+  return err?.code === "tool_use_failed" || (err?.status === 400 && err?.type === "invalid_request_error" && String(err?.message || "").toLowerCase().includes("tool"));
 }
 
 export { clearQueryContext };

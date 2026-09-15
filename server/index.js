@@ -7,6 +7,7 @@ import { classifyIntent } from "./src/intents.js";
 import { runResearch } from "./src/handlers/research.js";
 import { runWrite } from "./src/handlers/write.js";
 import { runGithub } from "./src/handlers/github.js";
+import { runBrowse } from "./src/handlers/browse.js";
 import { startSessionCleanupListener } from "./src/sessionCleanup.js";
 import { clearQueryContext } from "./src/queryContext.js";
 
@@ -16,12 +17,13 @@ const PORT = process.env.PORT || 8000;
 // One entry per real intent. Adding a new intent means: add its patterns to
 // intents.js, add its handler function here, and add one line to this map —
 // nothing else in this route changes. Every handler receives (prompt,
-// sessionId, queryId) — research/write ignore sessionId; all three use
-// queryId internally via the LLM fallback chain.
+// sessionId, queryId) — research/write/browse ignore sessionId; all four
+// use queryId internally via the LLM fallback chain.
 const HANDLERS = {
   research: runResearch,
   write: runWrite,
   github: runGithub,
+  browse: runBrowse,
 };
 
 startSessionCleanupListener();
@@ -46,7 +48,7 @@ app.post("/api/tasks", async (req, res) => {
     return res.json({
       intent: "unclassified",
       reason: classification.reason,
-      content: "This request doesn't match any supported intent yet. Try a direct knowledge question (e.g. \"what is...\") or a writing request (e.g. \"write an email...\").",
+      content: "This request doesn't match any supported intent yet. Try a direct knowledge question (e.g. \"what is...\"), a writing request (e.g. \"write an email...\"), or a browsing/search request (e.g. \"go to...\", \"search for...\").",
     });
   }
 

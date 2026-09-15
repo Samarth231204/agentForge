@@ -6,25 +6,30 @@
  *
  * Adding a new intent later means adding one more entry here, nothing else
  * in this file needs to change.
+ *
+ * ORDER MATTERS, deliberately, and has been fixed twice after real
+ * failures found in testing:
+ *   1. "github" first — several github-read phrasings ("tell me about
+ *      this repo", "explain...") share verbs with "research" ("explain",
+ *      "describe", "tell me about"); a github.com URL was being swallowed
+ *      by research before github's own patterns got a chance.
+ *   2. "browse" before "research" — "what is the current version of
+ *      node.js" was being answered from the model's own stale training
+ *      data by research's broad "what is" pattern, before browse (which
+ *      would actually run a live search) ever got a chance to run at all.
  */
 const INTENTS = [
   {
-    // Checked FIRST, deliberately: several github-read phrasings ("tell me
-    // about this repo", "explain this part of the project", "summarize
-    // this file") use the exact same verbs research's patterns look for
-    // ("explain", "describe", "tell me about"). If research were checked
-    // first, a prompt that literally contains a github.com URL or names
-    // "this repo" would still get swallowed by research before github's
-    // own patterns ever ran — confirmed happening in testing before this
-    // reordering. Placing github first costs nothing for genuine research/
-    // write prompts, since those essentially never mention repo/github/
-    // pull-request vocabulary at all.
     name: "github",
     description:
       "A request to read, change, or otherwise act on a GitHub repository — routes to a read-only lookup or a sandboxed change+PR workflow depending on the query's own wording.",
     patterns: [
       /\bmake\b[\s\S]*\bchanges?\b[\s\S]*\b(my|this|the) (project|repo|repository|code|codebase)\b/i,
       /\badd\b[\s\S]*\b(functionality|feature)\b[\s\S]*\b(my|this|the) (project|repo|repository)\b/i,
+      // Broader than the functionality/feature-specific pattern above:
+      // "add a navbar to my project" names a concrete thing to add, not
+      // the word "functionality" itself — found missing this in testing.
+      /\badd\b[\s\S]*\bto\b[\s\S]*\b(my|this|the) (project|repo|repository|code|codebase)\b/i,
       /\bfix\b[\s\S]*\bbug\b[\s\S]*\b(my|this|the) (project|repo|repository|code)\b/i,
       /\bopen a pull request\b/i,
       /\bpull request\b/i,
@@ -40,6 +45,50 @@ const INTENTS = [
       // was lost before this pattern was added).
       /\bghp_[A-Za-z0-9]{20,}\b/,
       /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+    ],
+  },
+  {
+    // Checked before "research": see ORDER MATTERS note above.
+    name: "browse",
+    description:
+      "Web search and/or interacting with a specific site — one continuous agent loop that searches, navigates, reads, and follows links as needed, from a one-shot lookup up to a multi-hop research task.",
+    patterns: [
+      // A navigation verb followed by anything other than a generic filler
+      // word is an unambiguous signal — whether the target is a literal
+      // URL ("go to https://...") or a site named by brand ("open
+      // YouTube") — even though the underlying goal can look like a plain
+      // research question on the surface. The negative lookahead is what
+      // rejects "open a file" while still accepting "open youtube".
+      /\b(?:go to|navigate to|open|visit)\s+(?!(?:a|an|the|this|that|it|new|my|your|some|another|file|files)\b)[a-z0-9]/i,
+      /\bsearch for\b/i,
+      /\bsearch the web\b/i,
+      /\blook up\b/i,
+      /\bbook a\b/i,
+      /\bbooking\b/i,
+      /\breservation\b/i,
+      /\breserve a\b/i,
+      /\bcheck availability\b/i,
+      // Broad catch-all: "search mars on youtube", "search X", etc. — any
+      // other phrasing of "search" at all still counts, same reasoning as
+      // write's catch-all (missed "search mars on YouTube" in testing
+      // before this was added — "search for"/"search the web" alone
+      // didn't cover "search X on Y").
+      /\bsearch\b/i,
+      /\bfind (out )?(information|info) (about|on)\b/i,
+      // Live/current-info signals — deliberately phrase-level, not a bare
+      // /\bcurrent\b/i, since "current" alone is a common homonym (e.g.
+      // "explain the current through this circuit" is a stable-physics
+      // research question, not a live-data one).
+      /\bcurrent version\b/i,
+      /\blatest version\b/i,
+      /\blatest news\b/i,
+      /\bup[- ]to[- ]date\b/i,
+      /\bright now\b/i,
+      /\bas of (today|now)\b/i,
+      /\btoday'?s\b/i,
+      /\bthis (week|month|year)'?s\b/i,
+      /\bnewest\b/i,
+      /\bcurrent (price|status|state)\b/i,
     ],
   },
   {
