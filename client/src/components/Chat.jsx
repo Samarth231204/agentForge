@@ -27,6 +27,7 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [flow, setFlow] = useState(null);
+  const [awaitingCredentials, setAwaitingCredentials] = useState(false);
   const [live, setLive] = useState(emptyLive);
   const socketRef = useRef(null);
   const bottomRef = useRef(null);
@@ -84,11 +85,19 @@ export default function Chat() {
       const { ok, data } = await post("/api/flows", { prompt: text, sessionId: SESSION_ID });
       if (!ok) {
         say("agent", "text", { text: data.error || "Something went wrong." });
+      } else if (data.needsCredentials) {
+        // Nothing was planned: the request needs a credential this session
+        // doesn't have yet. The original request is held server-side, so
+        // the reply to this can be just the token or a "done" after consent.
+        setAwaitingCredentials(true);
+        say("agent", "text", { text: data.content, intent: data.intent });
       } else if (data.flowId) {
+        setAwaitingCredentials(false);
         setFlow(data);
         setLive(emptyLive);
         say("agent", "text", { text: "Here's the agentic flow I'd run. Edit it in plain English, or approve it." });
       } else {
+        setAwaitingCredentials(false);
         // A single-capability request never becomes a flow — it just answers.
         say("agent", "text", { text: data.content, intent: data.intent });
       }
@@ -196,6 +205,7 @@ export default function Chat() {
     setLive(emptyLive);
     setEntries([]);
     setInput("");
+    setAwaitingCredentials(false);
   }
 
   return (
@@ -233,7 +243,13 @@ export default function Chat() {
           id="chat-message"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={flow ? "Change the flow in plain English, or paste a token…" : "Ask AgentForge to do something…"}
+          placeholder={
+            awaitingCredentials
+              ? "Paste the token here, or type 'done' once you've connected…"
+              : flow
+                ? "Change the flow in plain English, or paste a token…"
+                : "Ask AgentForge to do something…"
+          }
           disabled={busy}
           autoComplete="off"
         />

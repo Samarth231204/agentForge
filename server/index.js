@@ -13,8 +13,9 @@ import { startSessionCleanupListener } from "./src/sessionCleanup.js";
 import { clearQueryContext } from "./src/queryContext.js";
 import { getAuthUrl, exchangeCodeForTokens } from "./src/tools/googleAuth.js";
 import { saveGoogleTokens, getGoogleTokens } from "./src/googleSession.js";
-import { planFlow, reviseFlow, isObviouslySingleStep } from "./src/flowPlanner.js";
-import { harvestCredentials, redactCredentials } from "./src/intentShapes.js";
+import { planFlow, reviseFlow, isObviouslySingleStep, detectRequiredIntents } from "./src/flowPlanner.js";
+import { harvestCredentials, redactCredentials, extractFields, isBareCredentialReply } from "./src/intentShapes.js";
+import { checkCredentials, looksLikeGoAhead } from "./src/credentialGate.js";
 import { getSessionState, saveSessionState } from "./src/session.js";
 import { saveFlow, getFlow, updateFlow } from "./src/flows.js";
 import { runFlow } from "./src/flowExecutor.js";
@@ -154,31 +155,66 @@ function withLevels(flowId, flow) {
 }
 
 app.post("/api/flows", async (req, res) => {
-  const prompt = (req.body.prompt || "").trim();
+  const incoming = (req.body.prompt || "").trim();
   const sessionId = (req.body.sessionId || "").trim();
-  if (!prompt) {
+  if (!incoming) {
     return res.status(422).json({ error: "prompt cannot be blank" });
   }
 
-  // Cheap regex check first: a request that clearly needs one capability and
-  // shows no sequencing language never pays for a planning call at all, so
-  // simple questions cost exactly what they did before flows existed. Runs
-  // on the original prompt, before redaction, since that path hands the
-  // prompt straight to a handler that does its own credential extraction.
+  // Harvested FIRST, before anything branches on the prompt. A message that
+  // is nothing but a pasted PAT is how the user answers "I need a token",
+  // so the value has to reach session state even on paths that would
+  // otherwise treat that message as an ordinary request.
+  const credentials = harvestCredentials(incoming);
+  if (Object.keys(credentials).length > 0 && sessionId) {
+    const existing = (await getSessionState(sessionId)) || {};
+    await saveSessionState(sessionId, { ...existing, ...credentials });
+  }
+
+  // When the previous turn stopped to ask for a credential, the request the
+  // user actually wants run is the one they made before being interrupted —
+  // their latest message is a pasted token or a "done", not a new task.
+  const sessionState = (await getSessionState(sessionId)) || {};
+  const answeringAnAsk =
+    Boolean(sessionState.pendingFlowPrompt) &&
+    (looksLikeGoAhead(incoming) || Object.keys(credentials).length > 0 || isBareCredentialReply("github", incoming, extractFields("github", incoming)));
+  const prompt = answeringAnAsk ? sessionState.pendingFlowPrompt : incoming;
+
+  // Ask for credentials BEFORE planning, not mid-run. Otherwise a flow gets
+  // planned, displayed and approved, and only then does a node stop to say
+  // Gmail was never connected — after earlier nodes have already executed,
+  // and after a planning call was spent on a request that could not finish.
+  const needed = detectRequiredIntents(prompt);
+  if (needed.length > 0 && sessionId) {
+    const { satisfied, asks, intents } = await checkCredentials(needed, sessionId, prompt);
+    if (!satisfied) {
+      await saveSessionState(sessionId, { ...sessionState, pendingFlowPrompt: prompt });
+      return res.json({
+        needsCredentials: intents,
+        intent: intents[0],
+        content:
+          `Before I can plan this, I need ${asks.join(" and ")}.` +
+          (asks.length > 1 ? " Send them here and I'll build the flow." : " Send it here and I'll build the flow."),
+      });
+    }
+  }
+
+  // Everything required is present. Drop the stashed request so a later,
+  // unrelated message is never answered with this one.
+  if (sessionState.pendingFlowPrompt) {
+    await saveSessionState(sessionId, { ...sessionState, pendingFlowPrompt: null });
+  }
+
+  // Cheap regex check: a request that clearly needs one capability and shows
+  // no sequencing language never pays for a planning call at all, so simple
+  // questions cost exactly what they did before flows existed.
   if (isObviouslySingleStep(prompt)) {
     const { status, body } = await runSingleIntent(prompt, sessionId);
     return res.status(status || 200).json(body);
   }
 
-  // A pasted credential is moved into session state — where the handlers
-  // already look for it — and scrubbed from everything this route persists
-  // or returns. Generated nodes never carry a token, so without this the
-  // credential would be lost and a github node would ask for it again.
-  const credentials = harvestCredentials(prompt);
-  if (Object.keys(credentials).length > 0 && sessionId) {
-    const existing = (await getSessionState(sessionId)) || {};
-    await saveSessionState(sessionId, { ...existing, ...credentials });
-  }
+  // Scrubbed from everything this route persists or returns — generated
+  // nodes never carry a token, and plan text is both displayed and stored.
   const safePrompt = redactCredentials(prompt);
 
   const planQueryId = crypto.randomUUID().replace(/-/g, "");
