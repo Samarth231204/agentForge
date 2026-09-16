@@ -1,11 +1,11 @@
 import "./App.css";
-import PromptForm from "./components/PromptForm.jsx";
+import Chat from "./components/Chat.jsx";
 
 function App() {
   return (
     <>
       <h1 className="app-title">AgentForge</h1>
-      <PromptForm />
+      <Chat />
     </>
   );
 }

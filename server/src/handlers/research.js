@@ -10,9 +10,10 @@ const SYSTEM_PROMPT =
   "You answer directly and concisely from your own knowledge. " +
   "If you are not confident about a fact, say so explicitly rather than guessing.";
 
-export async function runResearch(prompt, _sessionId, queryId) {
+export async function runResearch(prompt, _sessionId, queryId, options = {}) {
   const message = await completeWithFallback({
     queryId,
+    onEvent: options.onEvent,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: prompt },

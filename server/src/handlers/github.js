@@ -31,17 +31,9 @@
  */
 import { getSessionState, saveSessionState } from "../session.js";
 import { completeWithFallback } from "../llmFallback.js";
+import { extractFields, describeMissing, isBareCredentialReply } from "../intentShapes.js";
 import * as githubTools from "../tools/githubTools.js";
 import { GithubUnavailable } from "../tools/githubTools.js";
-
-const PAT_PATTERN = /\b(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/;
-// Protocol optional — people type "github.com/owner/repo" bare as often as
-// the full "https://" form; normalizeRepoUrl below adds it back if missing.
-const REPO_URL_PATTERN = /\b(?:https:\/\/)?github\.com\/[\w.-]+\/[\w.-]+(?:\.git)?\b/i;
-
-function normalizeRepoUrl(url) {
-  return url.startsWith("http") ? url : `https://${url}`;
-}
 
 // ---------------------------------------------------------------------------
 // Sub-intent classification — pure text matching, same "forced-keyword"
@@ -110,8 +102,10 @@ const WANTS_SYNTHESIS_PATTERN = /\b(explain|summarize|summary|tell me about|desc
 // "read" sub-workflow
 // ---------------------------------------------------------------------------
 
-async function handleRead(prompt, repoUrl, token, queryId) {
+async function handleRead(prompt, repoUrl, token, queryId, onEvent) {
+  onEvent?.({ type: "tool_call", tool: "github", action: "fetch_tree", url: repoUrl });
   const tree = await githubTools.fetchRepoTree(repoUrl, token);
+  onEvent?.({ type: "tool_result", tool: "github", action: "fetch_tree", summary: `${tree.length} files` });
   const namedFile = extractNamedFile(prompt, tree);
   const wantsSynthesis = WANTS_SYNTHESIS_PATTERN.test(prompt);
 
@@ -136,6 +130,7 @@ async function handleRead(prompt, repoUrl, token, queryId) {
 
   const message = await completeWithFallback({
     queryId,
+    onEvent,
     messages: [
       { role: "system", content: "You answer questions about a GitHub repository using only the file contents provided below. Be concise and specific, citing file names where relevant. If the provided files don't actually answer the question, say so plainly." },
       { role: "user", content: `Request: ${prompt}\n\nRepository files:\n${contents.join("\n\n")}` },
@@ -164,7 +159,8 @@ function parseJsonPlan(raw) {
   }
 }
 
-async function handleChange(prompt, sessionId, repoUrl, token, branch, queryId) {
+async function handleChange(prompt, sessionId, repoUrl, token, branch, queryId, onEvent) {
+  onEvent?.({ type: "tool_call", tool: "github", action: "clone", url: repoUrl, branch });
   await githubTools.cloneRepo(sessionId, repoUrl, token, branch);
 
   const allFilesRaw = await githubTools.listFiles(sessionId);
@@ -190,6 +186,7 @@ async function handleChange(prompt, sessionId, repoUrl, token, branch, queryId) 
 
   const message = await completeWithFallback({
     queryId,
+    onEvent,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userMessage },
@@ -211,12 +208,15 @@ async function handleChange(prompt, sessionId, repoUrl, token, branch, queryId) 
     return { intent: "github", content: "The agent produced a plan but made no file changes." };
   }
 
+  onEvent?.({ type: "tool_call", tool: "github", action: "push", branch });
   const pushResult = await githubTools.pushBranch(sessionId, repoUrl, token, branch);
   if (pushResult.includes("No changes to push")) {
     return { intent: "github", content: `${plan.summary || ""}\n\nNo changes were needed.` };
   }
 
+  onEvent?.({ type: "tool_call", tool: "github", action: "open_pull_request", branch });
   const prResult = await githubTools.createPullRequest(repoUrl, token, branch, plan.pr_title, plan.pr_body);
+  onEvent?.({ type: "tool_result", tool: "github", action: "open_pull_request", summary: prResult.message });
   return { intent: "github", content: `${plan.summary || ""}\n\nChanged files: ${written.join(", ")}\n\n${prResult.message}` };
 }
 
@@ -224,33 +224,42 @@ async function handleChange(prompt, sessionId, repoUrl, token, branch, queryId) 
 // Entry point
 // ---------------------------------------------------------------------------
 
-export async function runGithub(prompt, sessionId, queryId) {
+export async function runGithub(prompt, sessionId, queryId, options = {}) {
   if (!sessionId) {
     return { intent: "github", content: "A session id is required for GitHub tasks." };
   }
 
   const state = (await getSessionState(sessionId)) || {};
 
-  const foundToken = prompt.match(PAT_PATTERN)?.[0];
-  const foundRepo = prompt.match(REPO_URL_PATTERN)?.[0];
-  const suppliedCredentialsThisTurn = Boolean(foundToken || foundRepo);
+  // Field names, patterns and the missing-field wording all come from the
+  // shared declaration in intentShapes.js — the same one the pipeline
+  // planner reads, so what's checked here can't drift from what a
+  // generated step was told to include.
+  const found = extractFields("github", prompt);
+  // Only a prompt that is purely a pasted credential may replay a stashed
+  // request; a complete new request that happens to name a repo must win.
+  const isReplyOnly = isBareCredentialReply("github", prompt, found);
 
-  if (foundToken) state.token = foundToken;
-  if (foundRepo) state.repoUrl = normalizeRepoUrl(foundRepo);
+  if (found.token) state.token = found.token;
+  if (found.repoUrl) state.repoUrl = found.repoUrl;
 
   if (!state.token || !state.repoUrl) {
     if (!state.pendingQuery) state.pendingQuery = prompt;
     await saveSessionState(sessionId, state);
-    const missing = [];
-    if (!state.token) missing.push("a GitHub Personal Access Token");
-    if (!state.repoUrl) missing.push("the repository URL (https://github.com/owner/repo)");
+    const missingFields = [];
+    if (!state.token) missingFields.push("token");
+    if (!state.repoUrl) missingFields.push("repoUrl");
+    const missing = describeMissing("github", missingFields);
     return {
       intent: "github",
+      // Marked failed so a flow re-run retries this node once the
+      // credential arrives — an unmet requirement is not a completed node.
+      failed: true,
       content: `I need ${missing.join(" and ")} before I can work on this. Reply with ${missing.length > 1 ? "both" : "it"} and I'll continue.`,
     };
   }
 
-  const taskPrompt = suppliedCredentialsThisTurn && state.pendingQuery ? state.pendingQuery : prompt;
+  const taskPrompt = isReplyOnly && state.pendingQuery ? state.pendingQuery : prompt;
   state.pendingQuery = null;
   await saveSessionState(sessionId, state);
 
@@ -258,17 +267,17 @@ export async function runGithub(prompt, sessionId, queryId) {
 
   try {
     if (subIntent === "read") {
-      return await handleRead(taskPrompt, state.repoUrl, state.token, queryId);
+      return await handleRead(taskPrompt, state.repoUrl, state.token, queryId, options.onEvent);
     }
     // "change" — the branch name IS the session id, so repeated change
     // queries in the same session keep committing to the same branch/PR
     // instead of opening a new one each time (cloneRepo's own checkout
     // step is what makes this continuation actually happen).
     const branch = sessionId;
-    return await handleChange(taskPrompt, sessionId, state.repoUrl, state.token, branch, queryId);
+    return await handleChange(taskPrompt, sessionId, state.repoUrl, state.token, branch, queryId, options.onEvent);
   } catch (err) {
     if (err instanceof GithubUnavailable) {
-      return { intent: "github", content: `GitHub task failed: ${err.message}` };
+      return { intent: "github", failed: true, content: `GitHub task failed: ${err.message}` };
     }
     throw err;
   }

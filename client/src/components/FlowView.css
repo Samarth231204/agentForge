@@ -1,0 +1,192 @@
+.flow {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 18px;
+  background: rgba(255, 255, 255, 0.018);
+  animation: fade-in 0.22s ease;
+}
+
+.flow-level {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The connector between levels is the tree's only structural decoration:
+   it means "everything below waits for everything above". */
+.flow-join {
+  align-self: center;
+  width: 1px;
+  height: 20px;
+  background: linear-gradient(to bottom, transparent, var(--line-bright), transparent);
+  margin: 2px 0;
+}
+
+.flow-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.node {
+  flex: 1 1 260px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  padding: 13px 15px;
+  transition: border-color 0.22s ease, box-shadow 0.22s ease, transform 0.22s ease;
+}
+
+.node-running {
+  border-color: rgba(168, 85, 247, 0.55);
+  box-shadow: 0 0 20px var(--purple-glow);
+  transform: translateY(-1px);
+}
+
+.node-done { border-color: rgba(74, 222, 128, 0.34); }
+.node-failed { border-color: rgba(248, 113, 113, 0.46); }
+.node-reused { border-color: rgba(148, 163, 184, 0.3); opacity: 0.78; }
+
+.node-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 9px;
+}
+
+.node-id {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.tick { font-size: 0.68rem; font-family: var(--mono); color: #4ade80; }
+.cross { font-size: 0.68rem; font-family: var(--mono); color: var(--err); }
+.reused { font-size: 0.68rem; font-family: var(--mono); color: #94a3b8; }
+
+.node-task {
+  margin: 0;
+  font-size: 0.87rem;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-wrap: break-word;
+}
+
+.node-edges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 9px;
+}
+
+/* A dependency that isn't simply "the level above" is stated explicitly,
+   because a graph node can have two parents and a tree can't show that. */
+.chip {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line-bright);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.chip-reuse { border-color: rgba(74, 222, 128, 0.3); color: #86efac; }
+
+.node-field {
+  margin: 8px 0 0;
+  font-family: var(--mono);
+  font-size: 0.71rem;
+  color: var(--purple-bright);
+  overflow-wrap: break-word;
+}
+
+/* The live inference view — what this agent is doing right now. */
+.node-activity {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 9px 0 0;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.act {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  color: var(--muted);
+  overflow-wrap: break-word;
+  animation: fade-in 0.18s ease;
+}
+
+.act-spawn { color: var(--purple-bright); }
+.act-tool { color: #5eead4; }
+.act-step { color: #93c5fd; }
+.act-llm { color: #94a3b8; }
+.act-skip { color: #94a3b8; }
+.act-fail { color: var(--err); }
+
+.node-result {
+  margin: 10px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 0.79rem;
+  line-height: 1.55;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.flow-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.flow-meta {
+  margin-right: auto;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* The run's answer sits inside the flow, below the tree it came from, so
+   the reading order is flow → answer → input. As a chat bubble it landed
+   above the flow, which meant scrolling up to read what you just ran. */
+.flow-answer {
+  margin-top: 16px;
+  padding: 15px 17px;
+  border-radius: 12px;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  background: rgba(168, 85, 247, 0.06);
+}
+
+.answer-label {
+  display: block;
+  font-size: 0.68rem;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--purple-bright);
+  margin-bottom: 8px;
+}
+
+.flow-answer p {
+  margin: 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}

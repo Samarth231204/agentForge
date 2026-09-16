@@ -19,8 +19,7 @@ import { getGoogleTokens } from "../googleSession.js";
 import { getAuthUrl } from "../tools/googleAuth.js";
 import { sendEmail, GmailUnavailable } from "../tools/gmailTool.js";
 import { completeWithFallback } from "../llmFallback.js";
-
-const EMAIL_PATTERN = /\b[\w.+-]+@[\w-]+\.[a-z]{2,}\b/i;
+import { extractFields, describeMissing, isBareCredentialReply } from "../intentShapes.js";
 
 function classifyGoogleSubIntent(_prompt) {
   // Only one sub-intent exists today; kept as a function (instead of a bare
@@ -53,9 +52,10 @@ const COMPOSE_SYSTEM_PROMPT =
   'object, no markdown, no extra text, in this exact format: {"subject":"<subject line>","body":"<email body>"}. ' +
   "Match the tone and length implied by the request. The body should be plain text, ready to send as-is.";
 
-async function composeEmail(prompt, queryId) {
+async function composeEmail(prompt, queryId, onEvent) {
   const message = await completeWithFallback({
     queryId,
+    onEvent,
     messages: [
       { role: "system", content: COMPOSE_SYSTEM_PROMPT },
       { role: "user", content: prompt },
@@ -68,14 +68,29 @@ async function composeEmail(prompt, queryId) {
   return { subject: "Message from AgentForge", body: message.content ?? "" };
 }
 
-async function handleGmail(prompt, sessionId, recipient, tokens, queryId) {
-  const { subject, body } = await composeEmail(prompt, queryId);
+/**
+ * `presetBody` is the cost optimization for pipelines: when an earlier step
+ * already produced the exact text that should be sent (a report written by
+ * the `write` intent, say), re-running composeEmail() would pay a whole LLM
+ * call to author content that already exists. Given a preset body, this
+ * skips that call entirely and only needs a subject, which the pipeline
+ * planner supplies as a plain field.
+ */
+async function handleGmail(prompt, sessionId, recipient, tokens, queryId, presetBody = null, presetSubject = null, onEvent = null) {
+  const { subject, body } = presetBody
+    ? { subject: presetSubject || "Message from AgentForge", body: presetBody }
+    : await composeEmail(prompt, queryId, onEvent);
   try {
+    onEvent?.({ type: "tool_call", tool: "gmail", action: "send", recipient, subject });
     const result = await sendEmail(sessionId, tokens, { to: recipient, subject, body });
+    onEvent?.({ type: "tool_result", tool: "gmail", action: "send", summary: result });
     return { intent: "google", content: `${result}\n\nSubject: ${subject}\n\n${body}` };
   } catch (err) {
     if (err instanceof GmailUnavailable) {
-      return { intent: "google", content: `Gmail send failed: ${err.message}` };
+      // `failed` is passed through by the flow executor so the live view
+      // colours this step as failed. Without it a send that never happened
+      // renders identically to one that did.
+      return { intent: "google", failed: true, content: `Gmail send failed: ${err.message}` };
     }
     throw err;
   }
@@ -85,7 +100,12 @@ async function handleGmail(prompt, sessionId, recipient, tokens, queryId) {
 // Entry point
 // ---------------------------------------------------------------------------
 
-export async function runGoogle(prompt, sessionId, queryId) {
+/**
+ * `options` is additive and optional — every existing caller passes three
+ * arguments and behaves exactly as before. The flow executor uses it to
+ * pass `body`/`subject` when an earlier step already wrote the content.
+ */
+export async function runGoogle(prompt, sessionId, queryId, options = {}) {
   if (!sessionId) {
     return { intent: "google", content: "A session id is required for Google tasks." };
   }
@@ -97,34 +117,44 @@ export async function runGoogle(prompt, sessionId, queryId) {
 
   const state = (await getSessionState(sessionId)) || {};
 
-  const foundRecipient = prompt.match(EMAIL_PATTERN)?.[0];
-  const suppliedRecipientThisTurn = Boolean(foundRecipient);
-  if (foundRecipient) state.gmailRecipient = foundRecipient;
+  // Recipient pattern and missing-field wording come from the shared
+  // declaration in intentShapes.js, which the flow planner also reads.
+  const found = extractFields("google", prompt);
+  // Only a prompt that is purely the answer to "what's the recipient?" may
+  // replay a stashed request; a complete new request must win over it.
+  const isReplyOnly = isBareCredentialReply("google", prompt, found);
+  if (found.recipient) state.gmailRecipient = found.recipient;
 
   const tokens = await getGoogleTokens(sessionId);
 
-  const missing = [];
-  if (!tokens) missing.push("your Google account connected");
-  if (!state.gmailRecipient) missing.push("the recipient's email address");
-
-  if (missing.length > 0) {
+  if (!tokens || !state.gmailRecipient) {
     if (!state.pendingGmailQuery) state.pendingGmailQuery = prompt;
     await saveSessionState(sessionId, state);
 
     const parts = [];
     if (!tokens) {
+      // Connecting an account is an OAuth redirect, not a field findable in
+      // the prompt, so its phrasing stays here rather than in the shape.
       const authUrl = getAuthUrl(sessionId);
       parts.push(`connect your Google account first — click this link, grant access, then come back and send your request again: ${authUrl}`);
     }
-    if (!state.gmailRecipient) parts.push("tell me the recipient's email address");
+    if (!state.gmailRecipient) {
+      parts.push(...describeMissing("google", ["recipient"]).map((ask) => `tell me ${ask}`));
+    }
 
-    return { intent: "google", content: `Before I can send this email, I need you to ${parts.join(" and ")}.` };
+    // `failed` matters beyond colouring the UI: the flow executor stores a
+    // node's outcome and skips anything that already succeeded on a re-run.
+    // Without this flag a blocked node counts as complete, so supplying the
+    // missing credential and pressing run again skips the very node that
+    // was waiting for it — which defeats resume for the one case it exists
+    // to serve. Nothing was sent here, so this is a failure.
+    return { intent: "google", failed: true, content: `Before I can send this email, I need you to ${parts.join(" and ")}.` };
   }
 
-  const taskPrompt = suppliedRecipientThisTurn && state.pendingGmailQuery ? state.pendingGmailQuery : prompt;
+  const taskPrompt = isReplyOnly && state.pendingGmailQuery ? state.pendingGmailQuery : prompt;
   const recipient = state.gmailRecipient;
   state.pendingGmailQuery = null;
   await saveSessionState(sessionId, state);
 
-  return await handleGmail(taskPrompt, sessionId, recipient, tokens, queryId);
+  return await handleGmail(taskPrompt, sessionId, recipient, tokens, queryId, options.body || null, options.subject || null, options.onEvent || null);
 }

@@ -25,7 +25,11 @@
 import { completeChatOnce } from "./llmClient.js";
 import { saveQueryContext, clearQueryContext } from "./queryContext.js";
 
-const GROQ_FALLBACK_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "qwen/qwen3.6-27b", "allam-2-7b"];
+// Checked against GET /v1/models — qwen/qwen3.6-27b was in this list but no
+// longer exists on the account, and a retired model is worse than a missing
+// one: it answers 404, which is not a capacity problem, so it used to throw
+// and kill the whole request instead of moving to the next candidate.
+const GROQ_FALLBACK_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "allam-2-7b"];
 
 function buildCandidates() {
   const primaryGroqModel = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
@@ -53,6 +57,14 @@ function buildCandidates() {
  */
 function isRetryableCandidateError(err) {
   const status = err?.status;
+  // A model that no longer exists, or that this account can't reach, is a
+  // problem with THIS candidate only — the next one may be perfectly fine.
+  // Found the hard way: a retired model left in the chain returned 404,
+  // which matched none of the checks below, so it threw and failed a whole
+  // pipeline step instead of cascading one place down the list. Model names
+  // get retired by providers without notice, so the chain has to tolerate
+  // it rather than depend on the list being permanently accurate.
+  if (status === 404) return true;
   // 413 belongs here too: Groq returns it for "request too large for this
   // model's TPM budget," which is exactly a rate-limit-shaped problem the
   // NEXT candidate (larger TPM budget, or a different provider entirely)
@@ -73,7 +85,14 @@ function isRetryableCandidateError(err) {
  * @param {object[]} [tools] - OpenAI-format tool schemas, if this call offers tools
  * @param {number} [temperature]
  */
-export async function completeWithFallback({ queryId, messages, tools, temperature }) {
+/**
+ * @param {function} [onEvent] - optional live-progress sink. Reports which
+ *   candidate is being tried and which one answered, information this
+ *   function already computes for its own logging. Purely additive: it is
+ *   called alongside work that happens regardless and can never change the
+ *   outcome of a call.
+ */
+export async function completeWithFallback({ queryId, messages, tools, temperature, onEvent }) {
   // Persisted before any candidate is even attempted, so the conversation
   // state is visible in Redis for the whole duration of this query,
   // regardless of which candidate ultimately answers it.
@@ -86,11 +105,13 @@ export async function completeWithFallback({ queryId, messages, tools, temperatu
     try {
       const message = await completeChatOnce({ ...candidate, messages, tools, temperature });
       console.log(`[llmFallback] ${candidate.provider}/${candidate.model} answered.`);
+      onEvent?.({ type: "llm_call", provider: candidate.provider, model: candidate.model, outcome: "answered" });
       return message;
     } catch (err) {
       lastErr = err;
       if (!isRetryableCandidateError(err)) throw err;
       console.warn(`[llmFallback] ${candidate.provider}/${candidate.model} unavailable (${err.message}) — trying next candidate.`);
+      onEvent?.({ type: "llm_call", provider: candidate.provider, model: candidate.model, outcome: "unavailable" });
     }
   }
   throw lastErr;

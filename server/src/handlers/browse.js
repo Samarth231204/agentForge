@@ -9,7 +9,7 @@
  */
 import { runBrowseQuery } from "../browseAgentLoop.js";
 
-export async function runBrowse(prompt, sessionId, queryId) {
-  const { answer, stepsUsed, turnsUsed } = await runBrowseQuery(prompt, queryId);
+export async function runBrowse(prompt, sessionId, queryId, options = {}) {
+  const { answer, stepsUsed, turnsUsed } = await runBrowseQuery(prompt, queryId, { onEvent: options.onEvent });
   return { intent: "browse", stepsUsed, turnsUsed, content: answer };
 }

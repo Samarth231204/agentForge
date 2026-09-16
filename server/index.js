@@ -13,6 +13,13 @@ import { startSessionCleanupListener } from "./src/sessionCleanup.js";
 import { clearQueryContext } from "./src/queryContext.js";
 import { getAuthUrl, exchangeCodeForTokens } from "./src/tools/googleAuth.js";
 import { saveGoogleTokens, getGoogleTokens } from "./src/googleSession.js";
+import { planFlow, reviseFlow, isObviouslySingleStep } from "./src/flowPlanner.js";
+import { harvestCredentials, redactCredentials } from "./src/intentShapes.js";
+import { getSessionState, saveSessionState } from "./src/session.js";
+import { saveFlow, getFlow, updateFlow } from "./src/flows.js";
+import { runFlow } from "./src/flowExecutor.js";
+import { toLevels } from "./src/flowGraph.js";
+import { attachWebSocketServer } from "./src/ws.js";
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -73,28 +80,31 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 });
 
-app.post("/api/tasks", async (req, res) => {
-  const prompt = (req.body.prompt || "").trim();
-  const sessionId = (req.body.sessionId || "").trim();
-  if (!prompt) {
-    return res.status(422).json({ error: "prompt cannot be blank" });
-  }
-
+/**
+ * The original single-intent path: classify, dispatch, respond. Factored out
+ * of the /api/tasks route so /api/pipelines can reuse it verbatim when a
+ * request turns out not to need a pipeline at all.
+ *
+ * Returns either {status, body} for an error case or {body} to send as-is.
+ */
+async function runSingleIntent(prompt, sessionId) {
   const classification = classifyIntent(prompt);
 
   if (classification.intent === "unclassified") {
-    return res.json({
-      intent: "unclassified",
-      reason: classification.reason,
-      content: "This request doesn't match any supported intent yet. Try a direct knowledge question (e.g. \"what is...\"), a writing request (e.g. \"write an email...\"), or a browsing/search request (e.g. \"go to...\", \"search for...\").",
-    });
+    return {
+      body: {
+        intent: "unclassified",
+        reason: classification.reason,
+        content: "This request doesn't match any supported intent yet. Try a direct knowledge question (e.g. \"what is...\"), a writing request (e.g. \"write an email...\"), or a browsing/search request (e.g. \"go to...\", \"search for...\").",
+      },
+    };
   }
 
   const handler = HANDLERS[classification.intent];
   if (!handler) {
     // A pattern in intents.js matched an intent name with no handler
     // registered above — fail loudly rather than silently falling through.
-    return res.status(500).json({ error: `No handler wired for intent "${classification.intent}".` });
+    return { status: 500, body: { error: `No handler wired for intent "${classification.intent}".` } };
   }
 
   // A fresh id per request, not per session — this is what the LLM
@@ -105,17 +115,164 @@ app.post("/api/tasks", async (req, res) => {
 
   try {
     const result = await handler(prompt, sessionId, queryId);
-    return res.json({ ...result, reason: classification.reason });
+    return { body: { ...result, reason: classification.reason } };
   } catch (err) {
     console.error(`${classification.intent} handler failed:`, err);
-    return res.status(502).json({ error: "The AI provider could not complete this request. Please retry shortly." });
+    return { status: 502, body: { error: "The AI provider could not complete this request. Please retry shortly." } };
   } finally {
     // Unconditional — cleared whether the query succeeded, failed, or an
     // exception propagated, so nothing lingers past its own request.
     await clearQueryContext(queryId);
   }
+}
+
+app.post("/api/tasks", async (req, res) => {
+  const prompt = (req.body.prompt || "").trim();
+  const sessionId = (req.body.sessionId || "").trim();
+  if (!prompt) {
+    return res.status(422).json({ error: "prompt cannot be blank" });
+  }
+
+  const { status, body } = await runSingleIntent(prompt, sessionId);
+  return res.status(status || 200).json(body);
 });
 
-app.listen(PORT, () => {
+// ---------------------------------------------------------------------------
+// Agentic flows — plan, edit in chat, run, then edit and run again.
+//
+// Unlike the pipeline routes these replace, a flow is long-lived: it is
+// planned once and then edited and re-run across as many chat turns as the
+// user wants. That is why nothing here 409s after a run — editing a
+// finished flow and running it again is the main path, not an error, and
+// it is how supplying a credential completes a blocked node without
+// redoing the work that already succeeded.
+// ---------------------------------------------------------------------------
+
+/** Adds the derived execution levels, so the client never computes them. */
+function withLevels(flowId, flow) {
+  return { flowId, ...flow, levels: toLevels(flow.nodes).map((level) => level.map((node) => node.id)) };
+}
+
+app.post("/api/flows", async (req, res) => {
+  const prompt = (req.body.prompt || "").trim();
+  const sessionId = (req.body.sessionId || "").trim();
+  if (!prompt) {
+    return res.status(422).json({ error: "prompt cannot be blank" });
+  }
+
+  // Cheap regex check first: a request that clearly needs one capability and
+  // shows no sequencing language never pays for a planning call at all, so
+  // simple questions cost exactly what they did before flows existed. Runs
+  // on the original prompt, before redaction, since that path hands the
+  // prompt straight to a handler that does its own credential extraction.
+  if (isObviouslySingleStep(prompt)) {
+    const { status, body } = await runSingleIntent(prompt, sessionId);
+    return res.status(status || 200).json(body);
+  }
+
+  // A pasted credential is moved into session state — where the handlers
+  // already look for it — and scrubbed from everything this route persists
+  // or returns. Generated nodes never carry a token, so without this the
+  // credential would be lost and a github node would ask for it again.
+  const credentials = harvestCredentials(prompt);
+  if (Object.keys(credentials).length > 0 && sessionId) {
+    const existing = (await getSessionState(sessionId)) || {};
+    await saveSessionState(sessionId, { ...existing, ...credentials });
+  }
+  const safePrompt = redactCredentials(prompt);
+
+  const planQueryId = crypto.randomUUID().replace(/-/g, "");
+  let nodes;
+  try {
+    // The planner is given the redacted prompt: it has no legitimate use for
+    // a token, and its output is displayed and stored.
+    nodes = await planFlow(safePrompt, planQueryId);
+  } catch (err) {
+    console.error("flow planning failed:", err);
+    // The planner's own message is user-facing and specific — it says
+    // explicitly that nothing was run, which matters for a request that
+    // would otherwise have sent mail or touched a repository.
+    return res.status(502).json({ error: err.message || "Could not plan this request. Please retry shortly." });
+  } finally {
+    await clearQueryContext(planQueryId);
+  }
+
+  // Really one node after all — no flow to review, so behave like a normal
+  // request and answer straight into the chat.
+  if (nodes.length === 1) {
+    const { status, body } = await runSingleIntent(prompt, sessionId);
+    return res.status(status || 200).json(body);
+  }
+
+  const flowId = crypto.randomUUID().replace(/-/g, "");
+  const flow = { sessionId, prompt: safePrompt, nodes, status: "pending_review", results: {}, ranNodes: [] };
+  await saveFlow(flowId, flow);
+  return res.json(withLevels(flowId, flow));
+});
+
+app.post("/api/flows/:id/edit", async (req, res) => {
+  const instruction = (req.body.instruction || "").trim();
+  if (!instruction) {
+    return res.status(422).json({ error: "instruction cannot be blank" });
+  }
+
+  const flow = await getFlow(req.params.id);
+  if (!flow) {
+    return res.status(404).json({ error: "That flow has expired or does not exist." });
+  }
+  if (flow.status === "running") {
+    return res.status(409).json({ error: "This flow is still running. Wait for it to finish before editing it." });
+  }
+
+  const editQueryId = crypto.randomUUID().replace(/-/g, "");
+  let revised;
+  try {
+    revised = await reviseFlow(flow.nodes, instruction, editQueryId);
+  } finally {
+    await clearQueryContext(editQueryId);
+  }
+
+  if (!revised) {
+    // Keep the existing flow rather than replacing it with something
+    // malformed — the user can rephrase.
+    return res.status(422).json({ error: "Could not apply that change. Try rephrasing it." });
+  }
+
+  // Status returns to pending_review so the edited flow reads as awaiting
+  // approval again, and `results`/`ranNodes` are deliberately preserved:
+  // they are what let the next run skip whatever the edit didn't touch.
+  const updated = await updateFlow(req.params.id, { nodes: revised, status: "pending_review" });
+  return res.json(withLevels(req.params.id, updated));
+});
+
+app.post("/api/flows/:id/run", async (req, res) => {
+  const flow = await getFlow(req.params.id);
+  if (!flow) {
+    return res.status(404).json({ error: "That flow has expired or does not exist." });
+  }
+  if (flow.status === "running") {
+    return res.status(409).json({ error: "This flow is already running." });
+  }
+
+  // Deliberately not awaited: a run can take minutes, and progress is
+  // reported over the WebSocket rather than in this response.
+  runFlow(req.params.id).catch((err) => console.error(`flow ${req.params.id} failed:`, err));
+
+  return res.json({ flowId: req.params.id, status: "running" });
+});
+
+app.get("/api/flows/:id", async (req, res) => {
+  const flow = await getFlow(req.params.id);
+  if (!flow) {
+    return res.status(404).json({ error: "That flow has expired or does not exist." });
+  }
+  return res.json(withLevels(req.params.id, flow));
+});
+
+const httpServer = app.listen(PORT, () => {
   console.log(`AgentForge server listening on http://localhost:${PORT}`);
 });
+
+// Shares the HTTP server (and therefore the port) rather than opening a
+// second listener — clients connect to ws://host:PORT/ws?flowId=...
+attachWebSocketServer(httpServer);

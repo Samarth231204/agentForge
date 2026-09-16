@@ -67,7 +67,7 @@ function buildStepSystemPrompt(step, priorContext) {
 /** One step's own sub-loop — bounded independently so one hard step can't
  * silently consume the entire task's budget without the others ever
  * getting a turn. */
-async function runStepLoop({ step, priorContext, browserTool, queryId, maxIterations }) {
+async function runStepLoop({ step, priorContext, browserTool, queryId, maxIterations, onEvent }) {
   const systemPrompt = buildStepSystemPrompt(step, priorContext);
   const messages = [
     { role: "system", content: systemPrompt },
@@ -77,7 +77,7 @@ async function runStepLoop({ step, priorContext, browserTool, queryId, maxIterat
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     let message;
     try {
-      message = await completeWithFallback({ queryId, messages, tools: TOOL_SCHEMAS, temperature: 0.2 });
+      message = await completeWithFallback({ queryId, messages, tools: TOOL_SCHEMAS, temperature: 0.2, onEvent });
     } catch (err) {
       if (!isInvalidToolCall(err)) throw err;
       messages.push({
@@ -111,6 +111,7 @@ async function runStepLoop({ step, priorContext, browserTool, queryId, maxIterat
       }
 
       if (call.function.name === "step_complete") {
+        onEvent?.({ type: "agent_step", label: `completion criteria satisfied: ${step.completionCriteria}`, phase: "done" });
         return { result: args.result || "Step completed with no result given.", turnsUsed: iteration + 1 };
       }
 
@@ -138,22 +139,25 @@ async function runStepLoop({ step, priorContext, browserTool, queryId, maxIterat
 /**
  * @returns {Promise<{answer: string, stepsUsed: number, turnsUsed: number}>}
  */
-export async function runBrowseQuery(prompt, queryId, { maxIterationsPerStep = 8 } = {}) {
+export async function runBrowseQuery(prompt, queryId, { maxIterationsPerStep = 8, onEvent } = {}) {
+  onEvent?.({ type: "agent_step", label: "breaking the browsing task into steps", phase: "planning" });
   const steps = await breakQueryIntoSteps(prompt, queryId);
+  onEvent?.({ type: "agent_step", label: `${steps.length} browsing step${steps.length === 1 ? "" : "s"} planned`, phase: "planned" });
 
   // One browser, one page, for the whole query — every step's sub-loop
   // shares it, so a three-step task pays for one launch, not three, and
   // later steps see whatever page state earlier ones left behind.
   const browser = await chromium.launch({ headless: true });
-  const browserTool = new BrowserTool(browser);
+  const browserTool = new BrowserTool(browser, onEvent);
 
   try {
     let context = "";
     let lastResult = "";
     let totalTurnsUsed = 0;
 
-    for (const step of steps) {
-      const { result, turnsUsed } = await runStepLoop({ step, priorContext: context, browserTool, queryId, maxIterations: maxIterationsPerStep });
+    for (const [index, step] of steps.entries()) {
+      onEvent?.({ type: "agent_step", label: step.description, phase: "running", step: index + 1, of: steps.length });
+      const { result, turnsUsed } = await runStepLoop({ step, priorContext: context, browserTool, queryId, maxIterations: maxIterationsPerStep, onEvent });
       lastResult = result;
       totalTurnsUsed += turnsUsed;
       context += `- Step "${step.description}": ${result}\n`;

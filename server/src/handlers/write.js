@@ -13,9 +13,10 @@ const SYSTEM_PROMPT =
   "piece — no preamble like \"Here is your essay:\", no meta-commentary, " +
   "unless the user explicitly asked for notes or options as well.";
 
-export async function runWrite(prompt, _sessionId, queryId) {
+export async function runWrite(prompt, _sessionId, queryId, options = {}) {
   const message = await completeWithFallback({
     queryId,
+    onEvent: options.onEvent,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: prompt },

@@ -84,3 +84,81 @@ textarea, input, button {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ---------------------------------------------------------------------------
+   Shared controls. These live here rather than in one component's stylesheet
+   because the chat shell, the flow tree and the node cards all use them —
+   previously they sat in PromptForm.css and were only available by accident
+   of that file being imported.
+   --------------------------------------------------------------------------- */
+
+.run-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(135deg, var(--purple), #6d28d9);
+  color: #fff;
+  border: none;
+  border-radius: 11px;
+  padding: 12px 22px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.1s ease, opacity 0.15s ease;
+}
+
+.run-button:hover:not(:disabled) {
+  box-shadow: 0 0 22px var(--purple-glow);
+  transform: translateY(-1px);
+}
+
+.run-button:active:not(:disabled) { transform: translateY(0); }
+
+.run-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.ghost-button {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line-bright);
+  border-radius: 11px;
+  padding: 12px 18px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.ghost-button:hover:not(:disabled) {
+  border-color: var(--purple);
+  color: var(--purple-bright);
+}
+
+.ghost-button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+.error-box {
+  padding: 12px 16px;
+  border-radius: 11px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.08);
+  color: var(--err);
+  font-size: 0.9rem;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}

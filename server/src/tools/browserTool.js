@@ -83,27 +83,45 @@ function extractSearchResults(els) {
   });
 }
 
+/** A one-line gist of a tool result, for the live feed. */
+function summarize(result) {
+  const text = String(result ?? "").replace(/\s+/g, " ").trim();
+  return text.length > 140 ? `${text.slice(0, 140)}…` : text;
+}
+
 export class BrowserTool {
   #browser = null;
   #page = null;
   #ownsBrowser = true;
 
+  #onEvent = null;
+
   /**
    * @param {import("playwright").Browser} [browser] - an already-launched
    *   browser to use instead of launching a new one. When given, this
    *   instance never closes it — whoever launched it owns closing it.
+   * @param {function} [onEvent] - optional live-progress sink. Reports each
+   *   action and the URL it touched, so the running flow can be watched.
+   *   Purely additive: it never changes what the browser does.
    */
-  constructor(browser = null) {
+  constructor(browser = null, onEvent = null) {
     if (browser) {
       this.#browser = browser;
       this.#ownsBrowser = false;
     }
+    this.#onEvent = onEvent;
   }
 
   async run(action = "", query = "", maxResults = 0, url = "", selector = "", text = "") {
+    // Reported before the work rather than after, because the interesting
+    // part of a slow browser call is knowing what it is currently doing.
+    this.#onEvent?.({ type: "tool_call", tool: "browser", action, ...(query ? { query } : {}), ...(url ? { url } : {}), ...(selector ? { selector } : {}) });
     try {
-      return await this.#execute(action, query, maxResults, url, selector, text);
+      const result = await this.#execute(action, query, maxResults, url, selector, text);
+      this.#onEvent?.({ type: "tool_result", tool: "browser", action, summary: summarize(result) });
+      return result;
     } catch (err) {
+      this.#onEvent?.({ type: "tool_result", tool: "browser", action, failed: true, summary: err.message });
       if (err instanceof BrowserUnavailable) throw err;
       throw new BrowserUnavailable(`The browser could not complete '${action}': ${err.message}`);
     }
@@ -112,6 +130,7 @@ export class BrowserTool {
   async #ensurePage() {
     if (!this.#page) {
       if (!this.#browser) {
+        this.#onEvent?.({ type: "tool_call", tool: "browser", action: "launch" });
         this.#browser = await chromium.launch({ headless: true });
       }
       this.#page = await this.#browser.newPage();

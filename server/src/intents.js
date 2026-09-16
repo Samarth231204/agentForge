@@ -23,7 +23,10 @@
  *      silently downgraded into write's plain content-generation reply
  *      instead of ever reaching the Gmail send workflow.
  */
-const INTENTS = [
+// Exported so the pipeline planner can build its intent catalogue from the
+// same names and descriptions the classifier uses, rather than keeping a
+// second copy that could drift out of sync with this one.
+export const INTENTS = [
   {
     name: "github",
     description:
