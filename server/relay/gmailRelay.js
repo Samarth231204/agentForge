@@ -19,7 +19,9 @@
  * Run it with its own env (see relay/.env.example):
  *   node relay/gmailRelay.js
  */
-import "dotenv/config";
+// MUST be the first import: it loads this directory's .env before any
+// module that reads process.env at import time is evaluated.
+import "./loadEnv.js";
 import express from "express";
 import { google } from "googleapis";
 

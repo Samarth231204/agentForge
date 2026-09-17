@@ -89,16 +89,19 @@ export function startSessionCleanupListener() {
 /**
  * The backstop: reconcile what exists against what should exist.
  *
- * The event-driven path above is precise but depends on
- * `notify-keyspace-events`, which requires `CONFIG SET` — a command managed
- * Redis providers (Upstash included) refuse. On a hosted deployment that
- * path therefore never fires at all, and the failure is silent: the app
- * logs one warning at boot and then leaks a volume per GitHub session
- * forever, until the disk fills.
+ * The event-driven path above is precise but conditional. It needs
+ * `notify-keyspace-events`, which is a `CONFIG SET` — and some managed
+ * Redis providers refuse that command, in which case no expiry event ever
+ * arrives and the failure is silent: one warning at boot, then a leaked
+ * volume per GitHub session until the disk fills. (Measured against
+ * Upstash specifically, `CONFIG SET` IS accepted and expiry events DO
+ * arrive, so there the event path is live and this is pure redundancy.)
  *
- * Reconciliation doesn't care why a volume is orphaned, so it covers that
- * case and also the ones the event path was always going to miss: volumes
- * left behind by a crash mid-session, or by a restart while Redis was down.
+ * It earns its place regardless, because reconciliation doesn't care why a
+ * volume is orphaned and so covers what the event path structurally cannot:
+ * volumes left behind by a crash mid-session, or by a restart while Redis
+ * was down — nobody is subscribed when those keys expire. Two such volumes
+ * were found on this sweep's very first run.
  */
 function startVolumeSweep(redis) {
   const sweep = async () => {
