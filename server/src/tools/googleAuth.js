@@ -8,16 +8,34 @@ import { google } from "googleapis";
 
 export const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send"];
 
-function requireConfig() {
+/**
+ * Config needed to BUILD a consent URL: a client id and the redirect to come
+ * back to. Deliberately does not require the client secret.
+ *
+ * `generateAuthUrl` never transmits the secret — it only assembles a query
+ * string. Demanding it anyway meant any process that merely shows a user the
+ * consent link had to hold the secret, which is what blocked running the
+ * token exchange and the sends somewhere separate from the web server.
+ */
+function requirePublicConfig() {
+  const { GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI } = process.env;
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_REDIRECT_URI) {
+    throw new Error("Gmail integration is not configured on this server (missing GOOGLE_CLIENT_ID/GOOGLE_REDIRECT_URI).");
+  }
+  return { GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI };
+}
+
+/** Config needed to EXCHANGE a code or refresh a token — includes the secret. */
+function requireSecretConfig() {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI } = process.env;
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REDIRECT_URI) {
-    throw new Error("Gmail integration is not configured on this server (missing GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REDIRECT_URI).");
+    throw new Error("Gmail token operations are not configured here (missing GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REDIRECT_URI).");
   }
   return { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI };
 }
 
 function buildOAuthClient() {
-  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI } = requireConfig();
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI } = requireSecretConfig();
   return new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
 }
 
@@ -27,7 +45,10 @@ function buildOAuthClient() {
  * the right session with no other state needed.
  */
 export function getAuthUrl(state) {
-  const client = buildOAuthClient();
+  // Built with the public config only, so a server that just shows the link
+  // never needs the client secret.
+  const { GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI } = requirePublicConfig();
+  const client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, undefined, GOOGLE_REDIRECT_URI);
   return client.generateAuthUrl({
     access_type: "offline", // required to receive a refresh_token at all
     scope: GMAIL_SCOPES,
