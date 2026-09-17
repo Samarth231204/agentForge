@@ -23,7 +23,12 @@ import { toLevels } from "./src/flowGraph.js";
 import { attachWebSocketServer } from "./src/ws.js";
 
 const app = express();
-const PORT = process.env.PORT || 8000;
+// 4000 matches what everything else in the project already assumes: the
+// client's fallback (Chat.jsx), client/.env, and the PORT written by
+// deploy/load-env.sh. The old 8000 default was only ever reachable when no
+// env var was set — i.e. exactly the deployed case — so it disagreed with
+// the reverse proxy precisely where nobody could see it.
+const PORT = process.env.PORT || 4000;
 
 // One entry per real intent. Adding a new intent means: add its patterns to
 // intents.js, add its handler function here, and add one line to this map —
