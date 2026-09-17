@@ -17,7 +17,7 @@
  * steps see whatever page state earlier steps left behind (still logged
  * in, still on the right site, etc.) rather than starting cold each time.
  */
-import { chromium } from "playwright";
+import { launchBrowser } from "./tools/browserLaunch.js";
 import { completeWithFallback, isInvalidToolCall } from "./llmFallback.js";
 import { BrowserTool, BROWSER_TOOL_NAME, BROWSER_TOOL_DESCRIPTION, BROWSER_TOOL_SCHEMA } from "./tools/browserTool.js";
 import { breakQueryIntoSteps } from "./tools/queryStepBreaker.js";
@@ -147,7 +147,7 @@ export async function runBrowseQuery(prompt, queryId, { maxIterationsPerStep = 8
   // One browser, one page, for the whole query — every step's sub-loop
   // shares it, so a three-step task pays for one launch, not three, and
   // later steps see whatever page state earlier ones left behind.
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchBrowser();
   const browserTool = new BrowserTool(browser, onEvent);
 
   try {

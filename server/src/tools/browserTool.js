@@ -23,7 +23,7 @@
  * has no "wrong thread" to call from in the first place — that whole class
  * of complexity just doesn't exist here.
  */
-import { chromium } from "playwright";
+import { launchBrowser } from "./browserLaunch.js";
 
 export class BrowserUnavailable extends Error {}
 
@@ -131,7 +131,7 @@ export class BrowserTool {
     if (!this.#page) {
       if (!this.#browser) {
         this.#onEvent?.({ type: "tool_call", tool: "browser", action: "launch" });
-        this.#browser = await chromium.launch({ headless: true });
+        this.#browser = await launchBrowser();
       }
       this.#page = await this.#browser.newPage();
     }
