@@ -1,0 +1,45 @@
+# AgentForge backend as a managed service.
+#
+# Install on the instance:
+#   sudo cp deploy/agentforge.service /etc/systemd/system/
+#   sudo cp deploy/load-env.sh /usr/local/bin/agentforge-load-env
+#   sudo chmod +x /usr/local/bin/agentforge-load-env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agentforge
+#
+# Secrets are pulled from SSM at start rather than stored on disk, so they
+# are never in the repo, never in an AMI, and never in a volume snapshot.
+# The generated env file is written 0600 and owned by the service user.
+
+[Unit]
+Description=AgentForge backend
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/agentForge/server
+
+# Fetch secrets from SSM into the env file before the app starts. Runs as
+# root so it can write to /etc, then hands a locked-down file to the app.
+PermissionsStartOnly=true
+ExecStartPre=/usr/local/bin/agentforge-load-env
+EnvironmentFile=/etc/agentforge.env
+
+ExecStart=/usr/bin/node index.js
+
+# A crash must not take the deployment down until someone notices.
+Restart=always
+RestartSec=5
+
+# Chromium spawns a lot of processes; the default limit is easy to hit when
+# several browse nodes have run.
+LimitNOFILE=65535
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentforge
+
+[Install]
+WantedBy=multi-user.target

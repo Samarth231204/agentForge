@@ -277,6 +277,28 @@ export async function removeSessionVolume(sessionId) {
 }
 
 /**
+ * Every sandbox volume currently on the host, as session ids.
+ *
+ * Exists so cleanup can work by reconciliation rather than only by reacting
+ * to Redis key-expiry events. Managed Redis providers block the `CONFIG`
+ * command, which means `notify-keyspace-events` can't be enabled and those
+ * events never arrive — so on a hosted deployment the event-driven path is
+ * silently dead and volumes would accumulate until the disk filled.
+ */
+export async function listSessionVolumes() {
+  const stdout = await hostDocker(
+    ["volume", "ls", "--quiet", "--filter", "name=agentforge-"],
+    { allowNonZeroExit: true, timeoutMs: 15000 }
+  );
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((name) => name.startsWith("agentforge-"))
+    .map((name) => name.slice("agentforge-".length))
+    .filter(Boolean);
+}
+
+/**
  * Pure-read operations, on GitHub's own REST API — no Docker, no clone, no
  * volume, no session at all. A read never needs to write anything, so
  * there's no reason to pay for a sandboxed container or persistent storage

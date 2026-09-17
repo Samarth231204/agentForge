@@ -41,7 +41,11 @@ const HANDLERS = {
 startSessionCleanupListener();
 
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:5173" }));
-app.use(express.json());
+// Capped because these routes face the public internet once deployed. The
+// largest legitimate body is a prompt or an edit instruction — kilobytes —
+// so the default unbounded parser only ever served to let an unauthenticated
+// caller buffer arbitrary memory on the box.
+app.use(express.json({ limit: "64kb" }));
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });

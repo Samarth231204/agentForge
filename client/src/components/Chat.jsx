@@ -6,10 +6,34 @@ import "./Chat.css";
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:4000";
 const WS_URL = SERVER_URL.replace(/^http/, "ws");
 
-// One hex session id per page load, reused for every request — this is what
-// ties a follow-up message (e.g. supplying a PAT after being asked) back to
-// the same server-side session state for GitHub tasks.
-const SESSION_ID = crypto.randomUUID().replace(/-/g, "");
+// One hex session id, reused for every request — this is what ties a
+// follow-up message (supplying a PAT, or returning from Google's consent
+// screen) back to the same server-side session state.
+//
+// Persisted rather than regenerated per page load, because the credentials
+// keyed to it are expensive to replace: a fresh id on every reload silently
+// disconnects the Google account the user just granted consent for and
+// discards their GitHub PAT, since both live in Redis under this exact
+// value. Locally that was a nuisance; deployed it reads as a broken app,
+// because a refresh is something users do without thinking.
+//
+// Wrapped in try/catch because storage access throws in private windows and
+// with site data blocked — there, a per-load id is the correct fallback.
+const SESSION_STORAGE_KEY = "agentforge:sessionId";
+
+function loadSessionId() {
+  const fresh = crypto.randomUUID().replace(/-/g, "");
+  try {
+    const existing = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (existing) return existing;
+    localStorage.setItem(SESSION_STORAGE_KEY, fresh);
+  } catch {
+    // Storage unavailable — this session just won't survive a reload.
+  }
+  return fresh;
+}
+
+const SESSION_ID = loadSessionId();
 
 const emptyLive = { phase: "review", nodeState: {}, results: {}, activity: {}, willRun: null };
 
