@@ -6,8 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "node --watch index.js",
-    "start": "node index.js",
-    "relay": "node relay/gmailRelay.js"
+    "start": "node index.js"
   },
   "keywords": [],
   "author": "",
